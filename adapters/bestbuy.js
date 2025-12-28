@@ -51,6 +51,8 @@ async function fetchCategoryOffers(apiKey, categoryId, categoryName) {
   let allOffers = [];
   let page = 1;
   let hasMore = true;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
 
   console.log(`  Fetching ${categoryName}...`);
 
@@ -58,6 +60,9 @@ async function fetchCategoryOffers(apiKey, categoryId, categoryName) {
     try {
       const url = `${baseUrl}&page=${page}`;
       const data = await fetch(url);
+
+      // Reset retry count on success
+      retryCount = 0;
 
       if (data.results && data.results.length > 0) {
         const totalPages = data.metadata?.page?.total || 1;
@@ -75,8 +80,9 @@ async function fetchCategoryOffers(apiKey, categoryId, categoryName) {
       }
     } catch (e) {
       console.log(`    Page ${page} failed: ${e.message}`);
-      if (e.message.includes('403')) {
-        console.log('    Rate limited, waiting 3s...');
+      if (e.message.includes('403') && retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(`    Rate limited, waiting 3s... (retry ${retryCount}/${MAX_RETRIES})`);
         await delay(3000);
         continue;
       }
