@@ -681,7 +681,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const results = await fetchAllDeals({
-        sources: ['bestbuy'],
+        sources: ['bestbuy', 'aafes'],
         apiKeys: { bestbuy: API_KEY }
       });
 
