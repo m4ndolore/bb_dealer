@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Best Buy M4/M5 MacBook Inventory Search
+ * Best Buy M3/M4/M5 MacBook Inventory Search
  * 
  * Usage:
  *   1. npm install (first time only)
@@ -109,7 +109,7 @@ async function fetchInventory(apiKey) {
   console.log(`Total Open Box offers fetched: ${allOffers.length}`);
 
   // Filter for M4/M5 processors - check multiple fields
-  const m4m5Pattern = /\bM[45]\b/i; // Simpler pattern to catch M4, M5, M4 Pro, etc.
+  const m3m4m5Pattern = /\bM[345]\b/i; // Pattern to catch M3, M4, M5, and their Pro/Max variants
   const filtered = allOffers.filter(offer => {
     // Build search text from all possible name/description fields
     const text = [
@@ -118,11 +118,11 @@ async function fetchInventory(apiKey) {
       offer.descriptions?.short,
       offer.name, // Some APIs use simple 'name' field
     ].filter(Boolean).join(' ');
-    const matches = m4m5Pattern.test(text);
+    const matches = m3m4m5Pattern.test(text);
     return matches;
   });
 
-  console.log(`After M4/M5 filter: ${filtered.length} products`);
+  console.log(`After M3/M4/M5 filter: ${filtered.length} products`);
   
   // Log sample if we got results
   if (filtered.length > 0) {
@@ -152,6 +152,9 @@ async function fetchInventory(apiKey) {
     else if (/M4\s*Max/i.test(text)) processor = 'M4 Max';
     else if (/M4\s*Pro/i.test(text)) processor = 'M4 Pro';
     else if (/\bM4\b/i.test(text)) processor = 'M4';
+    else if (/M3\s*Max/i.test(text)) processor = 'M3 Max';
+    else if (/M3\s*Pro/i.test(text)) processor = 'M3 Pro';
+    else if (/\bM3\b/i.test(text)) processor = 'M3';
 
     let modelType = 'MacBook';
     if (/Air/i.test(title)) modelType = 'MacBook Air';
@@ -260,7 +263,7 @@ const HTML = `<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Best Buy M4/M5 MacBook Finder</title>
+  <title>Best Buy M3/M4/M5 MacBook Finder</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     body { background: #111827; }
@@ -342,13 +345,16 @@ const HTML = `<!DOCTYPE html>
         
         if (data.error) throw new Error(data.error);
         
-        storeModal = { 
+        storeModal = {
           sku,
           condition,
-          stores: data.stores || [], 
-          loading: false, 
+          conditionName: data.conditionName || 'fair',
+          productPath: data.productPath || null,
+          stores: data.stores || [],
+          loading: false,
           error: null,
           buttonState: data.buttonState,
+          localStoreCount: data.localStoreCount || 0,
           product: products.find(p => p.sku === sku)
         };
       } catch (e) {
@@ -360,6 +366,14 @@ const HTML = `<!DOCTYPE html>
     function closeModal() {
       storeModal = null;
       render();
+    }
+
+    function getOpenBoxUrl(sku, productPath, conditionName) {
+      if (productPath) {
+        return \`https://www.bestbuy.com/product/\${productPath}/sku/\${sku}/openbox?condition=\${conditionName || 'fair'}\`;
+      }
+      // Fallback to buying options if no productPath
+      return \`https://www.bestbuy.com/site/\${sku}.p?skuId=\${sku}#tab=buyingOptions\`;
     }
 
     function getFiltered() {
@@ -400,7 +414,7 @@ const HTML = `<!DOCTYPE html>
         : 0;
 
       const processors = getUnique('processor').sort((a, b) => {
-        const order = ['M4', 'M4 Pro', 'M4 Max', 'M5', 'M5 Pro', 'M5 Max'];
+        const order = ['M3', 'M3 Pro', 'M3 Max', 'M4', 'M4 Pro', 'M4 Max', 'M5', 'M5 Pro', 'M5 Max'];
         return order.indexOf(a) - order.indexOf(b);
       });
 
@@ -420,11 +434,12 @@ const HTML = `<!DOCTYPE html>
                 <div class="text-center py-8">
                   <div class="text-3xl animate-spin mb-2">⏳</div>
                   <p class="text-gray-400">Finding stores with this open-box item...</p>
+                  <p class="text-gray-500 text-sm mt-2">This may take 15-30 seconds while we check Best Buy</p>
                 </div>
               \` : storeModal.error ? \`
                 <div class="bg-red-900/50 border border-red-700 rounded-lg p-4">
                   <p class="text-red-200">\${storeModal.error}</p>
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
+                  <a href="\${getOpenBoxUrl(storeModal.sku, storeModal.productPath, storeModal.conditionName)}"
                      target="_blank" class="inline-block mt-3 text-yellow-400 hover:text-yellow-300">
                     Check on bestbuy.com instead →
                   </a>
@@ -432,17 +447,18 @@ const HTML = `<!DOCTYPE html>
               \` : storeModal.stores.length === 0 ? \`
                 <div class="text-center py-8">
                   <div class="text-3xl mb-2">😔</div>
-                  <p class="text-gray-400">No stores near \${postalCode} have this open-box item.</p>
+                  <p class="text-gray-400">No stores nationwide have this open-box item in stock.</p>
                   <p class="text-gray-500 text-sm mt-2">Try a different condition or check bestbuy.com</p>
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
-                     target="_blank" 
+                  <a href="\${getOpenBoxUrl(storeModal.sku, storeModal.productPath, storeModal.conditionName)}"
+                     target="_blank"
                      class="inline-block mt-4 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition">
                     View on Best Buy →
                   </a>
                 </div>
               \` : \`
                 <div class="bg-green-900/30 border border-green-700/50 rounded-lg p-3 mb-4">
-                  <p class="text-green-200 text-sm">✓ Found \${storeModal.stores.length} store\${storeModal.stores.length === 1 ? '' : 's'} with this open-box item for pickup</p>
+                  <p class="text-green-200 text-sm">✓ Found \${storeModal.stores.length} store\${storeModal.stores.length === 1 ? '' : 's'} nationwide with this open-box item</p>
+                  \${storeModal.localStoreCount > 0 ? \`<p class="text-green-300/70 text-xs mt-1">\${storeModal.localStoreCount} near you, \${storeModal.stores.length - storeModal.localStoreCount} in other regions</p>\` : \`<p class="text-yellow-300/70 text-xs mt-1">None near you - showing other regions</p>\`}
                 </div>
                 <div class="space-y-3 max-h-80 overflow-y-auto">
                   \${storeModal.stores.map(store => \`
@@ -456,16 +472,17 @@ const HTML = `<!DOCTYPE html>
                         </div>
                         <div class="text-right">
                           <div class="text-xl font-bold text-blue-400">\${store.distance ? store.distance.toFixed(1) + ' mi' : ''}</div>
+                          \${!store.distance && store.searchedFrom ? \`<div class="text-xs text-gray-400">Other region</div>\` : ''}
                         </div>
                       </div>
                     </div>
                   \`).join('')}
                 </div>
                 <div class="mt-4 pt-4 border-t border-gray-700 text-center">
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
-                     target="_blank" 
+                  <a href="\${getOpenBoxUrl(storeModal.sku, storeModal.productPath, storeModal.conditionName)}"
+                     target="_blank"
                      class="inline-block px-6 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition">
-                    Reserve / Buy on Best Buy →
+                    Reserve / Buy Open-Box on Best Buy →
                   </a>
                 </div>
               \`}
@@ -475,7 +492,7 @@ const HTML = `<!DOCTYPE html>
 
         <div class="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
           <div>
-            <h1 class="text-2xl md:text-3xl font-bold text-blue-400">Best Buy M4/M5 MacBook Finder</h1>
+            <h1 class="text-2xl md:text-3xl font-bold text-blue-400">Best Buy M3/M4/M5 MacBook Finder</h1>
             <p class="text-gray-400 text-sm mt-1">Open-box inventory • \${new Date().toLocaleString()}</p>
           </div>
           <div class="flex gap-2 items-center">
@@ -615,8 +632,12 @@ const HTML = `<!DOCTYPE html>
                     p.discount >= 10 ? 'text-yellow-400' : 'text-gray-400'
                   }">-\${p.discount}%</div>
                   <div class="flex flex-col gap-1">
-                    <a href="\${p.url}" target="_blank" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition text-center text-sm">View →</a>
-                    \${!p.online ? \`<button onclick="findStores('\${p.sku}', '\${p.condition}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">📍 Find Stock</button>\` : ''}
+                    \${p.online ? \`
+                      <a href="\${p.url}" target="_blank" class="px-4 py-2 bg-green-600 hover:bg-green-500 text-white font-medium rounded-lg transition text-center text-sm">🛒 Buy Online</a>
+                    \` : \`
+                      <a href="\${p.url}" target="_blank" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition text-center text-sm">View →</a>
+                      <button onclick="findStores('\${p.sku}', '\${p.condition}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">📍 Find Stock</button>
+                    \`}
                   </div>
                 </div>
               </div>
@@ -658,9 +679,10 @@ const server = http.createServer(async (req, res) => {
     // Spawn the playwright script
     const { spawn } = require('child_process');
     const scriptPath = require('path').join(__dirname, 'fetch-stores.js');
-    
+
+    // Timeout: 120s - Playwright needs time to load page and call API
     const child = spawn('node', [scriptPath, sku, zipCode, condition], {
-      timeout: 60000
+      timeout: 120000
     });
     
     let stdout = '';
@@ -838,7 +860,7 @@ const server = http.createServer(async (req, res) => {
     
     try {
       const products = await fetchInventory(API_KEY);
-      console.log(`Found ${products.length} M4/M5 MacBooks`);
+      console.log(`Found ${products.length} M3/M4/M5 MacBooks`);
       res.end(JSON.stringify({ products }));
     } catch (e) {
       res.end(JSON.stringify({ error: e.message }));
@@ -854,7 +876,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════╗
-║  Best Buy M4/M5 MacBook Finder                            ║
+║  Best Buy M3/M4/M5 MacBook Finder                         ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Server running at: http://localhost:${PORT}                 ║
 ${API_KEY ? '║  API Key: ✓ Configured                                    ║' : '║  API Key: ✗ Set BESTBUY_API_KEY env var                   ║'}
