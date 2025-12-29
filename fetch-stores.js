@@ -121,7 +121,16 @@ async function fetchStores() {
 
   const browser = await chromium.launch({
     headless: isHeadless,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
+    channel: 'chrome',  // Use installed Chrome instead of bundled Chromium
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--window-size=1280,900'
+    ]
   });
 
   const context = await browser.newContext({
@@ -131,7 +140,31 @@ async function fetchStores() {
   });
 
   await context.addInitScript(() => {
+    // Hide webdriver
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
+
+    // Add chrome object if missing
+    if (!window.chrome) {
+      window.chrome = { runtime: {} };
+    }
+
+    // Override permissions query
+    const originalQuery = window.navigator.permissions.query;
+    window.navigator.permissions.query = (parameters) => (
+      parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+    );
+
+    // Add plugins
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [1, 2, 3, 4, 5]
+    });
+
+    // Add languages
+    Object.defineProperty(navigator, 'languages', {
+      get: () => ['en-US', 'en']
+    });
   });
 
   const page = await context.newPage();
