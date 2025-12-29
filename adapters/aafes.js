@@ -1,8 +1,9 @@
 /**
  * AAFES/Monetate API adapter
+ * Uses Playwright to intercept Monetate recommendations from shopmyexchange.com
  */
 
-const https = require('https');
+const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const { createDeal } = require('../lib/normalize');
@@ -15,72 +16,83 @@ const SOURCE = 'aafes';
 const configPath = path.join(__dirname, '..', 'config', 'aafes.json');
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
-function generateMonetateId() {
-  const part1 = Math.floor(Math.random() * 10);
-  const part2 = Math.floor(Math.random() * 1000000000);
-  const part3 = Date.now();
-  return `${part1}.${part2}.${part3}`;
-}
+/**
+ * Fetch products by intercepting Monetate API responses from the actual page
+ */
+async function fetchWithPlaywright() {
+  const isHeadless = process.env.HEADLESS !== 'false';
+  console.log(`  Launching browser (headless: ${isHeadless})...`);
 
-function buildPayload() {
-  return {
-    channel: config.channel,
-    events: [
-      {
-        eventType: 'monetate:decision:DecisionRequest',
-        requestId: `req-${Date.now()}`
-      },
-      {
-        eventType: 'monetate:context:PageView',
-        url: 'https://www.shopmyexchange.com/browse?query=aafes'
-      }
-    ],
-    monetateId: generateMonetateId()
-  };
-}
-
-function fetchApi(url, payload) {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const body = JSON.stringify(payload);
-
-    const options = {
-      hostname: urlObj.hostname,
-      path: urlObj.pathname,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body)
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        if (res.statusCode === 200) {
-          try {
-            resolve(JSON.parse(data));
-          } catch (e) {
-            reject(new Error('Invalid JSON response from Monetate API'));
-          }
-        } else {
-          reject(new Error(`Monetate API returned ${res.statusCode}: ${data.slice(0, 200)}`));
-        }
-      });
-    });
-
-    req.on('error', reject);
-    req.write(body);
-    req.end();
+  const browser = await chromium.launch({
+    headless: isHeadless,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
   });
-}
 
-function flattenItems(response) {
-  const responses = response?.data?.responses ?? [];
-  return responses.flatMap(r =>
-    (r.actions ?? []).flatMap(a => a.items ?? [])
-  );
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 900 },
+    locale: 'en-US'
+  });
+
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
+
+  const page = await context.newPage();
+
+  // Collect all items from intercepted Monetate responses
+  let allItems = [];
+
+  // Intercept Monetate API responses
+  page.on('response', async (response) => {
+    const url = response.url();
+    if (url.includes('engine.monetate.net') && url.includes('/decide/')) {
+      try {
+        const json = await response.json();
+        const responses = json?.data?.responses ?? [];
+        for (const r of responses) {
+          const actions = r.actions ?? [];
+          for (const action of actions) {
+            const items = action.items ?? [];
+            if (items.length > 0) {
+              console.log(`  Intercepted ${items.length} items from Monetate`);
+              allItems.push(...items);
+            }
+          }
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    }
+  });
+
+  try {
+    // Navigate to pages that trigger Monetate recommendations
+    const pages = [
+      { name: 'homepage', url: 'https://www.shopmyexchange.com/' },
+      { name: 'electronics', url: 'https://www.shopmyexchange.com/browse/electronics/_/N-111348' },
+      { name: 'computers', url: 'https://www.shopmyexchange.com/browse/computers/_/N-105467' }
+    ];
+
+    for (const p of pages) {
+      console.log(`  Loading ${p.name}...`);
+      try {
+        await page.goto(p.url, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+        // Wait for Monetate calls to complete
+        await page.waitForTimeout(5000);
+      } catch (e) {
+        console.log(`  Warning: ${p.name} failed - ${e.message.slice(0, 50)}`);
+      }
+    }
+
+    return allItems;
+
+  } finally {
+    await browser.close();
+  }
 }
 
 function parseNumber(value) {
@@ -101,7 +113,7 @@ function normalizeItem(item) {
   const itemLink = item.link ? `${item.link}` : null;
   const fullUrl = config.baseUrl && itemLink ? `${config.baseUrl}${itemLink}` : itemLink;
 
-  const id = item.id ?? item.itemGroupId ?? item.recSetId ?? `unknown-${Date.now()}`;
+  const id = item.id ?? item.itemGroupId ?? item.recSetId ?? `unknown-${Date.now()}-${Math.random()}`;
 
   return createDeal({
     id: `aafes-${id}`,
@@ -131,15 +143,24 @@ async function fetchDeals(apiKey, options = {}) {
     }
   }
 
-  console.log('Fetching fresh AAFES data...');
+  console.log('Fetching fresh AAFES data via Playwright...');
 
-  const payload = buildPayload();
-  const response = await fetchApi(config.apiUrl, payload);
-  const items = flattenItems(response);
+  const items = await fetchWithPlaywright();
 
-  console.log(`  Found ${items.length} items from Monetate API`);
+  console.log(`  Total items intercepted: ${items.length}`);
 
-  const deals = items.map(item => normalizeItem(item));
+  // Dedupe by ID
+  const seen = new Set();
+  const uniqueItems = items.filter(item => {
+    const id = item.id ?? item.itemGroupId ?? item.recSetId;
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+
+  console.log(`  Unique items after dedupe: ${uniqueItems.length}`);
+
+  const deals = uniqueItems.map(item => normalizeItem(item));
 
   console.log(`Total AAFES deals: ${deals.length}`);
 
