@@ -65,7 +65,7 @@ function fetchApi(url, payload) {
             reject(new Error('Invalid JSON response from Monetate API'));
           }
         } else {
-          reject(new Error(`Monetate API returned ${res.statusCode}`));
+          reject(new Error(`Monetate API returned ${res.statusCode}: ${data.slice(0, 200)}`));
         }
       });
     });
@@ -118,7 +118,8 @@ function normalizeItem(item) {
   });
 }
 
-async function fetchDeals(options = {}) {
+async function fetchDeals(apiKey, options = {}) {
+  // apiKey param unused - included for interface consistency with other adapters
   const { forceRefresh = false } = options;
 
   // Check cache first
