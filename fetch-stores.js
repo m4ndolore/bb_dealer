@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 /**
  * Playwright script to fetch Best Buy open-box store availability
- * Usage: node fetch-stores.js <sku> <zipCode> <condition>
- * 
- * Outputs JSON to stdout: { sku, zipCode, condition, stores: [...] }
+ *
+ * Usage: node fetch-stores.js <sku> <zipCode> <condition> [productPath]
+ *
+ * If productPath is provided, goes directly to open-box page (faster).
+ * If not provided, first resolves the product URL via API redirect.
+ *
+ * Condition codes: 0=fair, 1=satisfactory, 2=good, 3=excellent
+ *
+ * If no stores found in user's zipCode, searches nationwide using strategic zipcodes.
+ *
+ * Outputs JSON to stdout: { sku, zipCode, condition, conditionName, productPath, stores: [...] }
  */
 
 const { chromium } = require('playwright');
@@ -11,8 +19,8 @@ const { chromium } = require('playwright');
 const sku = process.argv[2];
 const zipCode = process.argv[3];
 const condition = process.argv[4] || '0';
+const productPath = process.argv[5] || null;
 
-// Map condition codes to URL-friendly names
 const conditionMap = {
   '0': 'fair',
   '1': 'satisfactory',
@@ -20,201 +28,226 @@ const conditionMap = {
   '3': 'excellent'
 };
 
+// Strategic US zipcodes for nationwide search (major metros, ~250mi radius coverage)
+const NATIONWIDE_ZIPCODES = [
+  '10001',  // NYC (Northeast)
+  '90001',  // Los Angeles (Southwest)
+  '60601',  // Chicago (Midwest)
+  '77001',  // Houston (South/Texas)
+  '98101',  // Seattle (Northwest)
+];
+
+async function fetchStoresForZip(page, sku, zip, condition) {
+  const result = await page.evaluate(async ({ sku, zipCode, condition }) => {
+    const payload = {
+      locationId: '',
+      zipCode: zipCode,
+      showOnShelf: true,
+      lookupInStoreQuantity: false,
+      consolidated: false,
+      items: [{ sku: sku, condition: condition, quantity: 1 }],
+      onlyBestBuyLocations: true,
+      pickupTypes: ['UPS_ACCESS_POINT', 'FEDEX_HAL'],
+      showInStore: false,
+      showOnlyOnShelf: false,
+      xboxAllAccess: false
+    };
+
+    try {
+      const response = await fetch('/productfulfillment/c/api/2.0/storeAvailability', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        return { error: `API returned ${response.status}` };
+      }
+
+      return await response.json();
+    } catch (e) {
+      return { error: e.message };
+    }
+  }, { sku, zipCode: zip, condition });
+
+  return result;
+}
+
+function extractAvailableStores(result) {
+  if (!result.ispu?.items?.[0]?.locations || !result.ispu?.locations) {
+    return [];
+  }
+
+  // Build a map of store details from ispu.locations
+  const storeDetailsMap = {};
+  for (const store of result.ispu.locations) {
+    storeDetailsMap[store.id] = store;
+  }
+
+  // Filter to only stores that have actual availability
+  const availableStores = [];
+  for (const loc of result.ispu.items[0].locations) {
+    if (loc.availability && loc.availability.availablePickupQuantity > 0) {
+      const storeDetails = storeDetailsMap[loc.locationId];
+      if (storeDetails) {
+        availableStores.push({
+          id: storeDetails.id,
+          name: storeDetails.name,
+          address: storeDetails.address,
+          city: storeDetails.city,
+          state: storeDetails.state,
+          zipCode: storeDetails.zipCode,
+          phone: storeDetails.phone,
+          distance: storeDetails.distance,
+          quantity: loc.availability.availablePickupQuantity,
+          pickupDate: loc.availability.minDate
+        });
+      }
+    }
+  }
+
+  return availableStores;
+}
+
 async function fetchStores() {
   const conditionName = conditionMap[condition] || 'fair';
-  const openBoxUrl = `https://www.bestbuy.com/site/${sku}.p?skuId=${sku}#tab=buyingOptions`;
-  
-  console.error(`Navigating to: ${openBoxUrl}`);
-  
-  const browser = await chromium.launch({ 
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  const isHeadless = process.env.HEADLESS !== 'false';
+
+  console.error(`SKU: ${sku}, Zip: ${zipCode}, Condition: ${conditionName}`);
+  console.error(`Headless: ${isHeadless}`);
+
+  const browser = await chromium.launch({
+    headless: isHeadless,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-blink-features=AutomationControlled']
   });
-  
+
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 }
+    viewport: { width: 1280, height: 900 },
+    locale: 'en-US'
   });
-  
+
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  });
+
   const page = await context.newPage();
-  
-  // Capture the storeAvailability API response
-  let storeData = null;
-  
-  page.on('response', async (response) => {
-    const url = response.url();
-    if (url.includes('storeAvailability') || url.includes('fulfillment')) {
-      console.error(`Intercepted: ${url.substring(0, 80)}...`);
+
+  try {
+    let resolvedPath = productPath;
+
+    // Step 1: Resolve product path if not provided
+    if (!resolvedPath) {
+      console.error('Step 1: Resolving product path via API redirect...');
+      const apiClickUrl = `https://api.bestbuy.com/click/-/${sku}/pdp`;
+
+      await page.goto(apiClickUrl, { waitUntil: 'commit', timeout: 45000 });
+      const currentUrl = page.url();
+      console.error(`  Redirected to: ${currentUrl}`);
+
+      const match = currentUrl.match(/\/product\/([^?]+)/);
+      if (!match) {
+        throw new Error('Could not extract product path from redirect URL');
+      }
+      resolvedPath = match[1];
+      console.error(`  Product path: ${resolvedPath}`);
+    }
+
+    // Step 2: Load open-box page to establish session
+    const openBoxUrl = `https://www.bestbuy.com/product/${resolvedPath}/sku/${sku}/openbox?condition=${conditionName}`;
+    console.error(`Step 2: Loading open-box page for session...`);
+    console.error(`  URL: ${openBoxUrl}`);
+
+    await page.goto(openBoxUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.waitForTimeout(3000);
+
+    // Step 3: Call storeAvailability API for user's zipcode first
+    console.error(`Step 3: Checking stores near ${zipCode}...`);
+
+    const result = await fetchStoresForZip(page, sku, zipCode, condition);
+
+    if (result.error) {
+      console.error(`  API Error: ${result.error}`);
+      console.log(JSON.stringify({
+        sku,
+        zipCode,
+        condition,
+        conditionName,
+        productPath: resolvedPath,
+        stores: [],
+        error: result.error
+      }));
+      return;
+    }
+
+    let allStores = extractAvailableStores(result);
+    const seenStoreIds = new Set(allStores.map(s => s.id));
+    const localStoreCount = allStores.length;
+
+    console.error(`  Found ${result.ispu?.locations?.length || 0} nearby stores, ${allStores.length} have this open-box item`);
+
+    // Step 4: Always search nationwide to find ALL available stores
+    console.error('Step 4: Searching nationwide for all available stock...');
+
+    for (const nationwideZip of NATIONWIDE_ZIPCODES) {
+      // Skip if it's the same as user's zip
+      if (nationwideZip === zipCode) continue;
+
+      console.error(`  Checking ${nationwideZip}...`);
+
       try {
-        const json = await response.json();
-        if (json.ispu?.locations) {
-          console.error(`  -> Found ${json.ispu.locations.length} store locations!`);
-          storeData = json;
-        } else if (json.ispu) {
-          console.error(`  -> ispu exists but no locations`);
+        const nationwideResult = await fetchStoresForZip(page, sku, nationwideZip, condition);
+
+        if (!nationwideResult.error) {
+          const stores = extractAvailableStores(nationwideResult);
+
+          // Add only new stores (dedupe by ID)
+          for (const store of stores) {
+            if (!seenStoreIds.has(store.id)) {
+              seenStoreIds.add(store.id);
+              // Clear distance since it's relative to a different zip
+              store.distance = null;
+              store.searchedFrom = nationwideZip;
+              allStores.push(store);
+            }
+          }
+
+          console.error(`    Found ${stores.length} stores with stock`);
         }
       } catch (e) {
-        // Not JSON or not the response we want
+        console.error(`    Error: ${e.message}`);
       }
+
+      // Small delay between requests
+      await page.waitForTimeout(500);
     }
-  });
-  
-  try {
-    // Navigate to the product page - don't wait for networkidle, BB has too many scripts
-    await page.goto(openBoxUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Wait for the page to stabilize a bit
-    await page.waitForTimeout(3000);
-    
-    // Try to find and click on the "Open-Box" or "Buying Options" section
-    const buyingOptionsTab = page.locator('[data-testid="buying-options-tab"]').or(
-      page.locator('button:has-text("Buying Options")')
-    ).or(
-      page.locator('a:has-text("Buying Options")')
-    );
-    
-    if (await buyingOptionsTab.count() > 0) {
-      console.error('Clicking Buying Options tab...');
-      await buyingOptionsTab.first().click();
-      await page.waitForTimeout(2000);
-    }
-    
-    // Look for open-box section
-    const openBoxSection = page.locator('[data-testid="open-box-section"]').or(
-      page.locator('text=Open-Box')
-    );
-    
-    if (await openBoxSection.count() > 0) {
-      console.error('Found Open-Box section');
-    }
-    
-    // Try to set zip code if there's a location input
-    const zipInput = page.locator('input[data-track="Zip Code"]').or(
-      page.locator('input[placeholder*="ZIP"]')
-    ).or(
-      page.locator('input[aria-label*="ZIP"]')
-    ).or(
-      page.locator('input[placeholder*="zip"]')
-    );
-    
-    if (await zipInput.count() > 0) {
-      console.error(`Found zip input, entering ${zipCode}`);
-      await zipInput.first().fill(zipCode);
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(3000);
-    }
-    
-    // Look for "Check Stores" or "See all pickup locations" or "choose a store" button
-    const checkStoresBtn = page.locator('button:has-text("Check Stores")').or(
-      page.locator('button:has-text("check stores")')
-    ).or(
-      page.locator('button:has-text("See all pickup")')
-    ).or(
-      page.locator('button:has-text("choose a store")')
-    ).or(
-      page.locator('button:has-text("Choose a Store")')
-    ).or(
-      page.locator('[data-track="See all pickup locations"]')
-    ).or(
-      page.locator('button:has-text("Find a Store")')
-    );
-    
-    if (await checkStoresBtn.count() > 0) {
-      console.error('Found check stores button, clicking...');
-      await checkStoresBtn.first().click();
-      await page.waitForTimeout(5000); // Wait longer for store modal to load
-    } else {
-      console.error('No check stores button found, waiting for API response...');
-      await page.waitForTimeout(5000);
-    }
-    
-    // If we intercepted store data from the API, use it
-    if (storeData) {
-      const stores = storeData.ispu?.locations || [];
-      console.log(JSON.stringify({
-        sku,
-        zipCode,
-        condition,
-        stores: stores.map(s => ({
-          id: s.id,
-          name: s.name,
-          address: s.address,
-          city: s.city,
-          state: s.state,
-          zipCode: s.zipCode,
-          phone: s.phone,
-          distance: s.distance
-        }))
-      }));
-      await browser.close();
-      return;
-    }
-    
-    // Wait a bit more and check again for intercepted data
-    console.error('Waiting for more network activity...');
-    await page.waitForTimeout(3000);
-    
-    if (storeData) {
-      const stores = storeData.ispu?.locations || [];
-      console.log(JSON.stringify({
-        sku,
-        zipCode,
-        condition,
-        stores: stores.map(s => ({
-          id: s.id,
-          name: s.name,
-          address: s.address,
-          city: s.city,
-          state: s.state,
-          zipCode: s.zipCode,
-          phone: s.phone,
-          distance: s.distance
-        }))
-      }));
-      await browser.close();
-      return;
-    }
-    
-    // Fallback: try to scrape store info from the DOM
-    console.error('No API interception, trying DOM scrape...');
-    
-    const storeElements = await page.locator('[class*="store-list"] [class*="store-item"]').or(
-      page.locator('[class*="pickup-store"]')
-    ).or(
-      page.locator('[data-testid*="store"]')
-    ).all();
-    
-    if (storeElements.length > 0) {
-      console.error(`Found ${storeElements.length} store elements in DOM`);
-      const stores = [];
-      for (const el of storeElements) {
-        const text = await el.textContent();
-        stores.push({ rawText: text });
-      }
-      console.log(JSON.stringify({ sku, zipCode, condition, stores, source: 'dom' }));
-    } else {
-      // Last resort: return page HTML snippet for debugging
-      const bodyText = await page.locator('body').textContent();
-      const hasOpenBox = bodyText.includes('Open-Box') || bodyText.includes('open-box');
-      console.error(`Page has open-box content: ${hasOpenBox}`);
-      console.log(JSON.stringify({ 
-        sku, 
-        zipCode, 
-        condition, 
-        stores: [],
-        error: 'Could not find store data',
-        hasOpenBoxContent: hasOpenBox
-      }));
-    }
-    
+
+    console.error(`  Total: ${allStores.length} stores nationwide (${localStoreCount} local, ${allStores.length - localStoreCount} other regions)`);
+
+    // Output results
+    console.log(JSON.stringify({
+      sku,
+      zipCode,
+      condition,
+      conditionName,
+      productPath: resolvedPath,
+      buttonState: result.buttonState?.[0]?.buttonState,
+      localStoreCount,
+      stores: allStores
+    }));
+
   } catch (e) {
     console.error(`Error: ${e.message}`);
-    console.log(JSON.stringify({ 
-      sku, 
-      zipCode, 
-      condition, 
-      stores: [], 
-      error: e.message 
+    console.log(JSON.stringify({
+      sku,
+      zipCode,
+      condition,
+      conditionName: conditionMap[condition] || 'fair',
+      stores: [],
+      error: e.message
     }));
   } finally {
     await browser.close();
@@ -222,7 +255,9 @@ async function fetchStores() {
 }
 
 if (!sku || !zipCode) {
-  console.error('Usage: node fetch-stores.js <sku> <zipCode> [condition]');
+  console.error('Usage: node fetch-stores.js <sku> <zipCode> <condition> [productPath]');
+  console.error('  condition: 0=fair, 1=satisfactory, 2=good, 3=excellent');
+  console.error('  productPath: optional, e.g., "apple-macbook-air.../JJGCQ8R67J"');
   process.exit(1);
 }
 
