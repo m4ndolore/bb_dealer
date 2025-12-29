@@ -103,7 +103,8 @@ const HTML = `<!DOCTYPE html>
 
     // Source definitions
     const SOURCES = {
-      bestbuy: { name: 'Best Buy', color: 'blue' }
+      bestbuy: { name: 'Best Buy', color: 'blue' },
+      aafes: { name: 'AAFES', color: 'green' }
     };
 
     async function loadProducts() {
