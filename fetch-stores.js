@@ -14,7 +14,7 @@
  * Outputs JSON to stdout: { sku, zipCode, condition, conditionName, productPath, stores: [...] }
  */
 
-const { chromium } = require('playwright');
+const { firefox } = require('playwright');
 
 const sku = process.argv[2];
 const zipCode = process.argv[3];
@@ -119,52 +119,19 @@ async function fetchStores() {
   console.error(`SKU: ${sku}, Zip: ${zipCode}, Condition: ${conditionName}`);
   console.error(`Headless: ${isHeadless}`);
 
-  const browser = await chromium.launch({
-    headless: isHeadless,
-    channel: 'chrome',  // Use installed Chrome instead of bundled Chromium
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--window-size=1280,900'
-    ]
+  const browser = await firefox.launch({
+    headless: isHeadless
   });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0',
     viewport: { width: 1280, height: 900 },
     locale: 'en-US'
   });
 
   await context.addInitScript(() => {
-    // Hide webdriver
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-
-    // Add chrome object if missing
-    if (!window.chrome) {
-      window.chrome = { runtime: {} };
-    }
-
-    // Override permissions query
-    const originalQuery = window.navigator.permissions.query;
-    window.navigator.permissions.query = (parameters) => (
-      parameters.name === 'notifications' ?
-        Promise.resolve({ state: Notification.permission }) :
-        originalQuery(parameters)
-    );
-
-    // Add plugins
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [1, 2, 3, 4, 5]
-    });
-
-    // Add languages
-    Object.defineProperty(navigator, 'languages', {
-      get: () => ['en-US', 'en']
-    });
+    // Hide webdriver property
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   });
 
   const page = await context.newPage();
