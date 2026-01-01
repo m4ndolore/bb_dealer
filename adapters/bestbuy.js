@@ -1,5 +1,5 @@
 /**
- * Best Buy Open Box API adapter
+ * Best Buy Open Box and Clearance API adapter
  */
 
 const https = require('https');
@@ -91,6 +91,106 @@ async function fetchCategoryOffers(apiKey, categoryId, categoryName) {
   }
 
   return allOffers;
+}
+
+async function fetchClearanceProducts(apiKey, categoryId, categoryName) {
+  const baseUrl = `https://api.bestbuy.com/v1/products(categoryPath.id=${categoryId}&clearance=true)?apiKey=${apiKey}&format=json&pageSize=100&show=sku,name,regularPrice,salePrice,onlineAvailability,inStoreAvailability,manufacturer,image,categoryPath`;
+
+  let allProducts = [];
+  let page = 1;
+  let hasMore = true;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
+
+  console.log(`  Fetching ${categoryName} clearance...`);
+
+  while (hasMore) {
+    try {
+      const url = `${baseUrl}&page=${page}`;
+      const data = await fetch(url);
+
+      retryCount = 0;
+
+      if (data.products && data.products.length > 0) {
+        const totalPages = data.totalPages || 1;
+        console.log(`    Page ${page}/${totalPages}: ${data.products.length} clearance items`);
+        allProducts = allProducts.concat(data.products);
+
+        if (page >= totalPages) {
+          hasMore = false;
+        } else {
+          page++;
+          await delay(1000);
+        }
+      } else {
+        hasMore = false;
+      }
+    } catch (e) {
+      console.log(`    Page ${page} failed: ${e.message}`);
+      if (e.message.includes('403') && retryCount < MAX_RETRIES) {
+        retryCount++;
+        console.log(`    Rate limited, waiting 3s... (retry ${retryCount}/${MAX_RETRIES})`);
+        await delay(3000);
+        continue;
+      }
+      hasMore = false;
+    }
+  }
+
+  return allProducts;
+}
+
+function normalizeClearanceProduct(product) {
+  const title = product.name || '';
+  const text = title;
+
+  const processor = parseProcessor(text);
+  const ramMatch = text.match(/(\d+)\s*GB\s*(Memory|RAM|Unified)/i);
+  const ram = ramMatch ? parseInt(ramMatch[1], 10) : null;
+  const storageMatch = text.match(/(\d+(?:TB|GB))\s*SSD/i);
+  const storage = storageMatch ? storageMatch[1] : null;
+  const sizeMatch = title.match(/(\d{2}(?:\.\d)?)["-]/);
+  const screenSize = sizeMatch ? sizeMatch[1] + '"' : null;
+
+  let modelType = null;
+  if (/Air/i.test(title)) modelType = 'MacBook Air';
+  else if (/MacBook Pro/i.test(title)) modelType = 'MacBook Pro';
+  else if (/Mac Mini/i.test(title)) modelType = 'Mac Mini';
+  else if (/Mac Studio/i.test(title)) modelType = 'Mac Studio';
+  else if (/iPad Pro/i.test(title)) modelType = 'iPad Pro';
+  else if (/iPad Air/i.test(title)) modelType = 'iPad Air';
+  else if (/iPad/i.test(title)) modelType = 'iPad';
+
+  const originalPrice = product.regularPrice || 0;
+  const currentPrice = product.salePrice || product.regularPrice || 0;
+
+  const online = product.onlineAvailability ?? false;
+  const inStore = product.inStoreAvailability ?? false;
+  let availability = 'online';
+  if (online && inStore) availability = 'both';
+  else if (inStore && !online) availability = 'in-store';
+
+  const productUrl = `https://www.bestbuy.com/site/${product.sku}.p?skuId=${product.sku}`;
+
+  return createDeal({
+    id: `bestbuy-clearance-${product.sku}`,
+    source: SOURCE,
+    category: detectCategory(text),
+    name: title || `SKU ${product.sku}`,
+    brand: product.manufacturer || '',
+    originalPrice,
+    currentPrice,
+    condition: 'Clearance',
+    availability,
+    url: productUrl,
+    image: product.image || '',
+    sku: product.sku,
+    processor,
+    modelType,
+    screenSize,
+    ram,
+    storage
+  });
 }
 
 function parseProcessor(text) {
@@ -195,7 +295,7 @@ async function fetchDeals(apiKey, options = {}) {
     }
   }
 
-  console.log('Fetching fresh Best Buy Open Box data...');
+  console.log('Fetching fresh Best Buy Open Box and Clearance data...');
 
   // Validate API key
   try {
@@ -208,6 +308,8 @@ async function fetchDeals(apiKey, options = {}) {
 
   let allDeals = [];
 
+  // Fetch Open Box items
+  console.log('Fetching Open Box items...');
   for (const categoryKey of categories) {
     const categoryId = CATEGORY_IDS[categoryKey];
     if (!categoryId) continue;
@@ -226,11 +328,25 @@ async function fetchDeals(apiKey, options = {}) {
       }
     }
 
-    // Delay between categories
     await delay(2000);
   }
 
-  console.log(`Total Best Buy deals: ${allDeals.length}`);
+  // Fetch Clearance items
+  console.log('Fetching Clearance items...');
+  for (const categoryKey of categories) {
+    const categoryId = CATEGORY_IDS[categoryKey];
+    if (!categoryId) continue;
+
+    const clearanceProducts = await fetchClearanceProducts(apiKey, categoryId, categoryKey);
+
+    for (const product of clearanceProducts) {
+      allDeals.push(normalizeClearanceProduct(product));
+    }
+
+    await delay(2000);
+  }
+
+  console.log(`Total Best Buy deals: ${allDeals.length} (Open Box + Clearance)`);
 
   // Cache results
   cache.write(SOURCE, allDeals);

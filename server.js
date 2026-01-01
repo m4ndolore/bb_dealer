@@ -443,6 +443,8 @@ const HTML = `<!DOCTYPE html>
                       p.condition.includes('Excellent') ? 'bg-green-900/50 text-green-300' :
                       p.condition.includes('Good') ? 'bg-lime-900/50 text-lime-300' :
                       p.condition.includes('Satisfactory') ? 'bg-yellow-900/50 text-yellow-300' :
+                      p.condition === 'Clearance' ? 'bg-red-900/50 text-red-300' :
+                      p.condition === 'new' ? 'bg-blue-900/50 text-blue-300' :
                       'bg-orange-900/50 text-orange-300'
                     }">\${p.condition}</span>
                     \${p.availability === 'online' ? '<span class="px-2 py-1 bg-green-600 text-white text-xs rounded-lg font-medium">Ships Nationwide</span>' : '<span class="px-2 py-1 bg-amber-900/50 text-amber-300 text-xs rounded-lg">In-Store Pickup Only</span>'}
