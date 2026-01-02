@@ -221,9 +221,15 @@ const HTML = `<!DOCTYPE html>
         ? Math.round(filtered.reduce((sum, p) => sum + p.discount, 0) / filtered.length) 
         : 0;
 
-      const processors = getUnique('processor').sort((a, b) => {
-        const order = ['M4', 'M4 Pro', 'M4 Max', 'M5', 'M5 Pro', 'M5 Max'];
-        return order.indexOf(a) - order.indexOf(b);
+      const processors = getUnique('processor').filter(Boolean).sort((a, b) => {
+        const order = ['M1', 'M1 Pro', 'M1 Max', 'M2', 'M2 Pro', 'M2 Max', 'M3', 'M3 Pro', 'M3 Max', 'M4', 'M4 Pro', 'M4 Max', 'M5', 'M5 Pro', 'M5 Max'];
+        const aIdx = order.indexOf(a);
+        const bIdx = order.indexOf(b);
+        // Items not in order go to the end
+        if (aIdx === -1 && bIdx === -1) return a.localeCompare(b);
+        if (aIdx === -1) return 1;
+        if (bIdx === -1) return -1;
+        return aIdx - bIdx;
       });
 
       document.getElementById('app').innerHTML = \`
