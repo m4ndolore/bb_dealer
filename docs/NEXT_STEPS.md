@@ -1,5 +1,27 @@
 # Next Steps
 
+## Session 2026-01-03: Micro Center Adapter Implementation
+
+### Completed
+- **Micro Center adapter** (`adapters/microcenter.js`) - Scrapes Open Box and Clearance deals from Micro Center website
+- **Tab navigation** - Added retailer tabs to switch between Best Buy, AAFES, and Micro Center
+- **Discount/price sliders** - Filter products by minimum discount percentage and max price
+- **Store availability** (`fetch-microcenter-stores.js`) - Check Micro Center store inventory with location-based sorting
+- **Geographic utilities** (`lib/geo.js`) - Distance calculations and zip code lookups
+- **Store location data** (`lib/microcenter-stores.js`) - Complete list of Micro Center locations
+
+### Known Issues
+- Micro Center website may rate limit aggressive scraping
+- Store availability requires Playwright browser automation (slower than API calls)
+- Only 25 Micro Center locations nationwide (limited compared to Best Buy)
+
+### Next Steps
+1. Add caching for Micro Center product listings to reduce scrape frequency
+2. Consider adding more retailers (B&H Photo, Amazon Warehouse, etc.)
+3. Implement unified search across all retailers
+
+---
+
 ## Session 2026-01-01: Inventory Discovery Improvements
 
 Key discovery: **Expanding nationwide search from 5 to 18 zip codes found hidden inventory** (14" M4 Max in Atlanta & Las Vegas that was missed before).

@@ -47,6 +47,29 @@ HEADLESS=false node fetch-stores.js 6551410 96817 2
   - Calls `/productfulfillment/c/api/2.0/storeAvailability` API directly via `page.evaluate`
   - Outputs JSON to stdout, logs to stderr
 
+- **adapters/microcenter.js** - Micro Center Open Box + Clearance scraping
+  - Scrapes Micro Center website for Open Box and Clearance deals
+  - Fetches products by category with pagination support
+  - Normalizes product data to common schema (title, price, discount, etc.)
+  - Supports filtering by discount percentage and price range
+
+- **fetch-microcenter-stores.js** - Micro Center store inventory lookup
+  - Checks product availability at Micro Center store locations
+  - Uses Playwright for browser-based scraping
+  - Returns store name, stock status, and location info
+
+### Supporting Libraries
+
+- **lib/geo.js** - Geographic utilities for location-based features
+  - Distance calculations between coordinates
+  - Zip code to coordinate lookup
+  - Store proximity sorting
+
+- **lib/microcenter-stores.js** - Micro Center store location data
+  - Complete list of Micro Center store locations
+  - Store metadata (address, coordinates, store ID)
+  - Used by fetch-microcenter-stores.js for availability lookups
+
 ### Data Flow
 
 1. Frontend loads → calls `/api/products`

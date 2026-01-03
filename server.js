@@ -177,6 +177,10 @@ const HTML = `<!DOCTYPE html>
     let sourceFilter = 'all';
     let postalCode = localStorage.getItem('bb-postal-code') || '';
     let storeModal = null; // {sku, stores, loading, error}
+    let activeTab = localStorage.getItem('bb-active-tab') || 'all';
+    let minDiscountFilter = parseInt(localStorage.getItem('bb-min-discount') || '0');
+    let minPriceFilter = parseInt(localStorage.getItem('bb-min-price') || '0');
+    let maxPriceFilter = parseInt(localStorage.getItem('bb-max-price') || '10000');
 
     // Category definitions (from server)
     const CATEGORIES = {
@@ -190,7 +194,8 @@ const HTML = `<!DOCTYPE html>
     // Source definitions
     const SOURCES = {
       bestbuy: { name: 'Best Buy', color: 'blue' },
-      aafes: { name: 'AAFES', color: 'green' }
+      aafes: { name: 'AAFES', color: 'green' },
+      microcenter: { name: 'Micro Center', color: 'purple' }
     };
 
     async function loadProducts() {
@@ -216,52 +221,87 @@ const HTML = `<!DOCTYPE html>
       render();
     }
 
-    async function findStores(sku) {
+    function saveTab(tab) {
+      activeTab = tab;
+      localStorage.setItem('bb-active-tab', tab);
+      render();
+    }
+
+    function saveMinDiscount(value) {
+      minDiscountFilter = parseInt(value);
+      localStorage.setItem('bb-min-discount', value);
+      render();
+    }
+
+    function saveMinPrice(value) {
+      minPriceFilter = parseInt(value);
+      localStorage.setItem('bb-min-price', value);
+      render();
+    }
+
+    function saveMaxPrice(value) {
+      maxPriceFilter = parseInt(value);
+      localStorage.setItem('bb-max-price', value);
+      render();
+    }
+
+    // Map our condition names to BB's condition codes
+    function getConditionCode(condition) {
+      // Based on observation: "0" = fair from the URL pattern
+      // Need to test others, but likely: 0=fair, 1=satisfactory, 2=good, 3=excellent
+      if (condition.includes('Fair')) return '0';
+      if (condition.includes('Satisfactory')) return '1';
+      if (condition.includes('Good')) return '2';
+      if (condition.includes('Excellent')) return '3';
+      return '0'; // Default to fair
+    }
+
+    async function findStores(sku, condition = 'Open-Box Fair', source = 'bestbuy', productUrl = '') {
       if (!postalCode || postalCode.length < 5) {
         alert('Please enter your zip code first');
         return;
       }
-      
-      const conditions = ['fair', 'good', 'excellent'];
-      storeModal = { sku, conditions, stores: [], loading: true, error: null };
+
+      const product = products.find(p => p.sku === sku);
+      storeModal = { sku, condition, stores: [], loading: true, error: null, source };
       render();
-      
+
       try {
-        const res = await fetch('/api/find-stock', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            skus: [sku],
-            conditions,
-            seedZips: [postalCode],
-            maxZips: 1
-          })
-        });
-        const data = await res.json();
-        
-        if (data.error) throw new Error(data.error);
-
-        const hits = data.hits || [];
-        const byStore = new Map();
-
-        for (const hit of hits) {
-          const storeId = String(hit.storeId || '');
-          if (!byStore.has(storeId)) {
-            byStore.set(storeId, { storeId, store: hit.store || null, hits: [] });
-          }
-          byStore.get(storeId).hits.push(hit);
+        let apiUrl;
+        if (source === 'microcenter') {
+          // Micro Center uses product URL for store availability
+          const params = new URLSearchParams({
+            zipCode: postalCode,
+            url: productUrl || product?.url || ''
+          });
+          apiUrl = \`/api/microcenter-stores/\${sku}?\${params}\`;
+        } else {
+          // Best Buy uses condition codes
+          const conditionCode = getConditionCode(condition);
+          const params = new URLSearchParams({
+            zipCode: postalCode,
+            condition: conditionCode
+          });
+          apiUrl = \`/api/openbox-stores/\${sku}?\${params}\`;
         }
+
+        const res = await fetch(apiUrl);
+        const data = await res.json();
+
+        if (data.error) throw new Error(data.error);
 
         storeModal = {
           sku,
-          conditions,
-          stores: [...byStore.values()],
+          condition,
+          source,
+          stores: data.stores || [],
           loading: false,
           error: null,
-          product: products.find(p => p.sku === sku)
+          buttonState: data.buttonState,
+          product
         };
       } catch (e) {
-        storeModal = { sku, conditions, stores: [], loading: false, error: e.message };
+        storeModal = { sku, condition, source, stores: [], loading: false, error: e.message };
       }
       render();
     }
@@ -273,6 +313,7 @@ const HTML = `<!DOCTYPE html>
 
     function getFiltered() {
       return products
+        .filter(p => activeTab === 'all' || p.source === activeTab)
         .filter(p => categoryFilter === 'all' || p.category === categoryFilter)
         .filter(p => sourceFilter === 'all' || p.source === sourceFilter)
         .filter(p => brandFilter === 'all' || p.brand === brandFilter)
@@ -280,6 +321,8 @@ const HTML = `<!DOCTYPE html>
         .filter(p => conditionFilter === 'all' || p.condition === conditionFilter)
         .filter(p => modelFilter === 'all' || p.modelType === modelFilter)
         .filter(p => minRamFilter === 0 || p.ram >= minRamFilter)
+        .filter(p => p.discount >= minDiscountFilter)
+        .filter(p => p.currentPrice >= minPriceFilter && p.currentPrice <= maxPriceFilter)
         .filter(p => {
           if (availabilityFilter === 'all') return true;
           if (availabilityFilter === 'ships') return p.availability === 'online';
@@ -328,56 +371,50 @@ const HTML = `<!DOCTYPE html>
             <div class="bg-gray-800 rounded-2xl p-6 w-full max-w-lg max-h-[80vh] overflow-y-auto">
               <div class="flex justify-between items-start mb-4">
                 <div>
-                  <h2 class="text-xl font-bold text-white">Open-Box Pickup Locations</h2>
-                  <p class="text-sm text-gray-400 mt-1">SKU \${storeModal.sku} · \${storeModal.conditions.join(', ')}</p>
+                  <h2 class="text-xl font-bold text-white">\${storeModal.source === 'microcenter' ? 'Micro Center' : 'Open-Box'} Pickup Locations</h2>
+                  <p class="text-sm text-gray-400 mt-1">SKU \${storeModal.sku} · \${storeModal.condition}</p>
                 </div>
                 <button onclick="closeModal()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
               </div>
-              
+
               \${storeModal.loading ? \`
                 <div class="text-center py-8">
                   <div class="text-3xl animate-spin mb-2">⏳</div>
-                  <p class="text-gray-400">Finding stores with this open-box item...</p>
+                  <p class="text-gray-400">Finding stores with this item...</p>
                 </div>
               \` : storeModal.error ? \`
                 <div class="bg-red-900/50 border border-red-700 rounded-lg p-4">
                   <p class="text-red-200">\${storeModal.error}</p>
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
+                  <a href="\${storeModal.product?.url || '#'}"
                      target="_blank" class="inline-block mt-3 text-yellow-400 hover:text-yellow-300">
-                    Check on bestbuy.com instead →
+                    Check on \${storeModal.source === 'microcenter' ? 'microcenter.com' : 'bestbuy.com'} instead →
                   </a>
                 </div>
               \` : storeModal.stores.length === 0 ? \`
                 <div class="text-center py-8">
                   <div class="text-3xl mb-2">😔</div>
-                  <p class="text-gray-400">No stores near \${postalCode} have this open-box item.</p>
-                  <p class="text-gray-500 text-sm mt-2">Try a different condition or check bestbuy.com</p>
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
-                     target="_blank" 
+                  <p class="text-gray-400">No stores near \${postalCode} have this item in stock.</p>
+                  <p class="text-gray-500 text-sm mt-2">\${storeModal.source === 'microcenter' ? 'Check the product page for availability' : 'Try a different condition'}</p>
+                  <a href="\${storeModal.product?.url || '#'}"
+                     target="_blank"
                      class="inline-block mt-4 px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition">
-                    View on Best Buy →
+                    View Product →
                   </a>
                 </div>
               \` : \`
                 <div class="bg-green-900/30 border border-green-700/50 rounded-lg p-3 mb-4">
-                  <p class="text-green-200 text-sm">✓ Found \${storeModal.stores.length} store\${storeModal.stores.length === 1 ? '' : 's'} with this open-box item for pickup</p>
+                  <p class="text-green-200 text-sm">✓ Found \${storeModal.stores.length} store\${storeModal.stores.length === 1 ? '' : 's'} with this item for pickup</p>
                 </div>
                 <div class="space-y-3 max-h-80 overflow-y-auto">
                   \${storeModal.stores.map(store => \`
                     <div class="bg-gray-700 rounded-lg p-4">
                       <div class="flex justify-between items-start">
                         <div>
-                          <div class="font-semibold text-white text-lg">\${store.store?.name || 'Store ' + store.storeId}</div>
-                          <div class="text-sm text-gray-400">\${store.store?.address || ''}</div>
-                          <div class="text-sm text-gray-400">\${store.store ? \`\${store.store.city}, \${store.store.state} \${store.store.zip}\` : ''}</div>
-                          <div class="text-xs text-gray-500 mt-1">\${store.store?.phone || ''}</div>
-                          <div class="text-xs text-gray-400 mt-2">
-                            \${store.hits.map(hit => \`
-                              <span class="inline-block mr-2 mb-1 px-2 py-1 bg-gray-800 text-gray-200 text-xs rounded-lg">
-                                \${hit.condition} · qty \${hit.qty}\${hit.variantSku && hit.originalSku && hit.variantSku !== hit.originalSku ? \` · variant \${hit.variantSku}\` : ''}
-                              </span>
-                            \`).join('')}
-                          </div>
+                          <div class="font-semibold text-white text-lg">\${store.name}</div>
+                          <div class="text-sm text-gray-400">\${store.address || ''}</div>
+                          <div class="text-sm text-gray-400">\${store.city ? store.city + ', ' : ''}\${store.state || ''} \${store.zipCode || store.zip || ''}</div>
+                          \${store.stockCount ? \`<div class="text-xs text-green-400 mt-1">\${store.stockCount} in stock</div>\` : ''}
+                          \${store.phone ? \`<div class="text-xs text-gray-500 mt-1">\${store.phone}</div>\` : ''}
                         </div>
                         <div class="text-right">
                           <div class="text-xs text-gray-400">Store ID</div>
@@ -388,10 +425,10 @@ const HTML = `<!DOCTYPE html>
                   \`).join('')}
                 </div>
                 <div class="mt-4 pt-4 border-t border-gray-700 text-center">
-                  <a href="https://www.bestbuy.com/site/\${storeModal.sku}.p?skuId=\${storeModal.sku}#tab=buyingOptions" 
-                     target="_blank" 
+                  <a href="\${storeModal.product?.url || '#'}"
+                     target="_blank"
                      class="inline-block px-6 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition">
-                    Reserve / Buy on Best Buy →
+                    \${storeModal.source === 'microcenter' ? 'View on Micro Center' : 'Reserve / Buy on Best Buy'} →
                   </a>
                 </div>
               \`}
@@ -420,6 +457,21 @@ const HTML = `<!DOCTYPE html>
               🔄 Refresh
             </button>
           </div>
+        </div>
+
+        <div class="flex gap-1 mb-6 bg-gray-800 rounded-xl p-1">
+          <button onclick="saveTab('all')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'all' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'}">
+            All Sources
+          </button>
+          <button onclick="saveTab('bestbuy')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'bestbuy' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}">
+            Best Buy
+          </button>
+          <button onclick="saveTab('microcenter')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'microcenter' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}">
+            Micro Center
+          </button>
+          <button onclick="saveTab('aafes')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'aafes' ? 'bg-green-600 text-white' : 'text-gray-400 hover:text-white'}">
+            AAFES
+          </button>
         </div>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
@@ -525,6 +577,26 @@ const HTML = `<!DOCTYPE html>
               </select>
             </div>
           </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mt-3">
+            <div class="col-span-2">
+              <label class="block text-xs text-gray-400 mb-1">Min Discount: \${minDiscountFilter}%+</label>
+              <input type="range" min="0" max="70" step="5" value="\${minDiscountFilter}"
+                     onchange="saveMinDiscount(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Min Price: $\${minPriceFilter}</label>
+              <input type="range" min="0" max="5000" step="100" value="\${minPriceFilter}"
+                     onchange="saveMinPrice(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Max Price: $\${maxPriceFilter}</label>
+              <input type="range" min="0" max="10000" step="100" value="\${maxPriceFilter}"
+                     onchange="saveMaxPrice(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+          </div>
         </div>
 
         <div class="space-y-3">
@@ -573,7 +645,7 @@ const HTML = `<!DOCTYPE html>
                   }">-\${p.discount}%</div>
                   <div class="flex flex-col gap-1">
                     <a href="\${p.url}" target="_blank" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition text-center text-sm">View</a>
-                    \${p.availability === 'in-store' ? \`<button onclick="findStores('\${p.sku}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">Find Stock</button>\` : ''}
+                    \${p.availability === 'in-store' ? \`<button onclick="findStores('\${p.sku}', '\${p.condition}', '\${p.source}', '\${p.url}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">Find Stock</button>\` : ''}
                   </div>
                 </div>
               </div>
@@ -847,7 +919,70 @@ const server = http.createServer(async (req, res) => {
     
     return;
   }
-  
+
+  // Micro Center store availability endpoint
+  if (url.pathname.startsWith('/api/microcenter-stores/')) {
+    res.setHeader('Content-Type', 'application/json');
+
+    const productId = url.pathname.split('/api/microcenter-stores/')[1];
+    const zipCode = url.searchParams.get('zipCode') || '';
+    const productUrl = url.searchParams.get('url');
+
+    if (!productId && !productUrl) {
+      res.end(JSON.stringify({ error: 'Product ID or URL required' }));
+      return;
+    }
+
+    // Build product URL if not provided
+    const targetUrl = productUrl || `https://www.microcenter.com/product/${productId}/`;
+
+    console.log(`Fetching Micro Center stores for product ${productId}, zip ${zipCode}...`);
+
+    // Spawn the playwright script
+    const { spawn } = require('child_process');
+    const scriptPath = require('path').join(__dirname, 'fetch-microcenter-stores.js');
+
+    const child = spawn('node', [scriptPath, targetUrl, zipCode], {
+      timeout: 60000
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+      console.log(`  MC Playwright: ${data.toString().trim()}`);
+    });
+
+    child.on('close', (code) => {
+      if (code !== 0) {
+        console.log(`  MC Playwright exited with code ${code}`);
+        res.end(JSON.stringify({ error: stderr || 'Failed to fetch stores', stores: [] }));
+        return;
+      }
+
+      try {
+        const result = JSON.parse(stdout);
+        console.log(`  Found ${result.stores?.length || 0} Micro Center stores with stock`);
+        res.end(JSON.stringify(result));
+      } catch (e) {
+        console.log(`  Parse error: ${e.message}`);
+        res.end(JSON.stringify({ error: 'Failed to parse response', stores: [] }));
+      }
+    });
+
+    child.on('error', (err) => {
+      console.log(`  Spawn error: ${err.message}`);
+      res.end(JSON.stringify({ error: err.message, stores: [] }));
+    });
+
+    return;
+  }
+
   // Store availability endpoint (public API - shows regular inventory)
   if (url.pathname.startsWith('/api/stores/')) {
     res.setHeader('Content-Type', 'application/json');
@@ -986,7 +1121,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const results = await fetchAllDeals({
-        sources: ['bestbuy', 'aafes'],
+        sources: ['bestbuy', 'aafes', 'microcenter'],
         apiKeys: { bestbuy: API_KEY }
       });
 
