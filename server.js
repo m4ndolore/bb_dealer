@@ -104,7 +104,8 @@ const HTML = `<!DOCTYPE html>
     // Source definitions
     const SOURCES = {
       bestbuy: { name: 'Best Buy', color: 'blue' },
-      aafes: { name: 'AAFES', color: 'green' }
+      aafes: { name: 'AAFES', color: 'green' },
+      microcenter: { name: 'Micro Center', color: 'purple' }
     };
 
     async function loadProducts() {
@@ -690,7 +691,7 @@ const server = http.createServer(async (req, res) => {
 
     try {
       const results = await fetchAllDeals({
-        sources: ['bestbuy', 'aafes'],
+        sources: ['bestbuy', 'aafes', 'microcenter'],
         apiKeys: { bestbuy: API_KEY }
       });
 
