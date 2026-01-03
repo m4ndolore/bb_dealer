@@ -92,6 +92,9 @@ const HTML = `<!DOCTYPE html>
     let postalCode = localStorage.getItem('bb-postal-code') || '';
     let storeModal = null; // {sku, stores, loading, error}
     let activeTab = localStorage.getItem('bb-active-tab') || 'all';
+    let minDiscountFilter = parseInt(localStorage.getItem('bb-min-discount') || '0');
+    let minPriceFilter = parseInt(localStorage.getItem('bb-min-price') || '0');
+    let maxPriceFilter = parseInt(localStorage.getItem('bb-max-price') || '10000');
 
     // Category definitions (from server)
     const CATEGORIES = {
@@ -135,6 +138,24 @@ const HTML = `<!DOCTYPE html>
     function saveTab(tab) {
       activeTab = tab;
       localStorage.setItem('bb-active-tab', tab);
+      render();
+    }
+
+    function saveMinDiscount(value) {
+      minDiscountFilter = parseInt(value);
+      localStorage.setItem('bb-min-discount', value);
+      render();
+    }
+
+    function saveMinPrice(value) {
+      minPriceFilter = parseInt(value);
+      localStorage.setItem('bb-min-price', value);
+      render();
+    }
+
+    function saveMaxPrice(value) {
+      maxPriceFilter = parseInt(value);
+      localStorage.setItem('bb-max-price', value);
       render();
     }
 
@@ -199,6 +220,8 @@ const HTML = `<!DOCTYPE html>
         .filter(p => conditionFilter === 'all' || p.condition === conditionFilter)
         .filter(p => modelFilter === 'all' || p.modelType === modelFilter)
         .filter(p => minRamFilter === 0 || p.ram >= minRamFilter)
+        .filter(p => p.discount >= minDiscountFilter)
+        .filter(p => p.currentPrice >= minPriceFilter && p.currentPrice <= maxPriceFilter)
         .filter(p => {
           if (availabilityFilter === 'all') return true;
           if (availabilityFilter === 'ships') return p.availability === 'online';
@@ -442,6 +465,26 @@ const HTML = `<!DOCTYPE html>
                 <option value="all">All Conditions</option>
                 \${getUnique('condition').map(c => \`<option value="\${c}" \${conditionFilter===c?'selected':''}>\${c}</option>\`).join('')}
               </select>
+            </div>
+          </div>
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3 mt-3">
+            <div class="col-span-2">
+              <label class="block text-xs text-gray-400 mb-1">Min Discount: \${minDiscountFilter}%+</label>
+              <input type="range" min="0" max="70" step="5" value="\${minDiscountFilter}"
+                     onchange="saveMinDiscount(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Min Price: $\${minPriceFilter}</label>
+              <input type="range" min="0" max="5000" step="100" value="\${minPriceFilter}"
+                     onchange="saveMinPrice(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
+            </div>
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Max Price: $\${maxPriceFilter}</label>
+              <input type="range" min="0" max="10000" step="100" value="\${maxPriceFilter}"
+                     onchange="saveMaxPrice(this.value)"
+                     class="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer">
             </div>
           </div>
         </div>
