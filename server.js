@@ -91,6 +91,7 @@ const HTML = `<!DOCTYPE html>
     let sourceFilter = 'all';
     let postalCode = localStorage.getItem('bb-postal-code') || '';
     let storeModal = null; // {sku, stores, loading, error}
+    let activeTab = localStorage.getItem('bb-active-tab') || 'all';
 
     // Category definitions (from server)
     const CATEGORIES = {
@@ -128,6 +129,12 @@ const HTML = `<!DOCTYPE html>
     function savePostalCode(code) {
       postalCode = code;
       localStorage.setItem('bb-postal-code', code);
+      render();
+    }
+
+    function saveTab(tab) {
+      activeTab = tab;
+      localStorage.setItem('bb-active-tab', tab);
       render();
     }
 
@@ -185,6 +192,7 @@ const HTML = `<!DOCTYPE html>
 
     function getFiltered() {
       return products
+        .filter(p => activeTab === 'all' || p.source === activeTab)
         .filter(p => categoryFilter === 'all' || p.category === categoryFilter)
         .filter(p => sourceFilter === 'all' || p.source === sourceFilter)
         .filter(p => processorFilter === 'all' || p.processor === processorFilter)
@@ -323,6 +331,21 @@ const HTML = `<!DOCTYPE html>
               🔄 Refresh
             </button>
           </div>
+        </div>
+
+        <div class="flex gap-1 mb-6 bg-gray-800 rounded-xl p-1">
+          <button onclick="saveTab('all')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'all' ? 'bg-gray-600 text-white' : 'text-gray-400 hover:text-white'}">
+            All Sources
+          </button>
+          <button onclick="saveTab('bestbuy')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'bestbuy' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}">
+            Best Buy
+          </button>
+          <button onclick="saveTab('microcenter')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'microcenter' ? 'bg-purple-600 text-white' : 'text-gray-400 hover:text-white'}">
+            Micro Center
+          </button>
+          <button onclick="saveTab('aafes')" class="px-4 py-2 rounded-lg font-medium transition \${activeTab === 'aafes' ? 'bg-green-600 text-white' : 'text-gray-400 hover:text-white'}">
+            AAFES
+          </button>
         </div>
 
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
