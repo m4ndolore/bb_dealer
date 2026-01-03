@@ -14,7 +14,7 @@ const CATEGORY_IDS = {
   laptops: 'pcmcat247400050001',      // Laptops
   tablets: 'pcmcat209000050006',       // iPads & Tablets
   storage: 'pcmcat212600050008',       // Hard Drives & Storage
-  compute: 'abcat0501000',             // Desktop Computers
+  desktops: 'abcat0501000',            // Desktop Computers
 };
 
 function fetch(url) {
@@ -93,6 +93,58 @@ async function fetchCategoryOffers(apiKey, categoryId, categoryName) {
   return allOffers;
 }
 
+// Search-based query for better brand coverage (category filter misses non-Apple)
+async function fetchDealsBySearch(apiKey, searchTerm, dealType) {
+  // dealType: 'clearance', 'onSale', or 'both'
+  let filter = '';
+  if (dealType === 'clearance') filter = '&clearance=true';
+  else if (dealType === 'onSale') filter = '&onSale=true';
+  else if (dealType === 'both') filter = '&(clearance=true|onSale=true)';
+
+  const baseUrl = `https://api.bestbuy.com/v1/products(search=${encodeURIComponent(searchTerm)}${filter})?apiKey=${apiKey}&format=json&pageSize=100&show=sku,name,regularPrice,salePrice,onlineAvailability,inStoreAvailability,manufacturer,image,categoryPath,percentSavings`;
+
+  let allProducts = [];
+  let page = 1;
+  let hasMore = true;
+  let retryCount = 0;
+  const MAX_RETRIES = 3;
+
+  console.log(`  Fetching "${searchTerm}" ${dealType}...`);
+
+  while (hasMore && page <= 10) { // Cap at 10 pages
+    try {
+      const url = `${baseUrl}&page=${page}`;
+      const data = await fetch(url);
+      retryCount = 0;
+
+      if (data.products && data.products.length > 0) {
+        const totalPages = Math.min(data.totalPages || 1, 10);
+        console.log(`    Page ${page}/${totalPages}: ${data.products.length} items`);
+        allProducts = allProducts.concat(data.products);
+
+        if (page >= totalPages) {
+          hasMore = false;
+        } else {
+          page++;
+          await delay(1000);
+        }
+      } else {
+        hasMore = false;
+      }
+    } catch (e) {
+      console.log(`    Page ${page} failed: ${e.message}`);
+      if (e.message.includes('403') && retryCount < MAX_RETRIES) {
+        retryCount++;
+        await delay(3000);
+        continue;
+      }
+      hasMore = false;
+    }
+  }
+
+  return allProducts;
+}
+
 async function fetchClearanceProducts(apiKey, categoryId, categoryName) {
   const baseUrl = `https://api.bestbuy.com/v1/products(categoryPath.id=${categoryId}&clearance=true)?apiKey=${apiKey}&format=json&pageSize=100&show=sku,name,regularPrice,salePrice,onlineAvailability,inStoreAvailability,manufacturer,image,categoryPath`;
 
@@ -152,14 +204,7 @@ function normalizeClearanceProduct(product) {
   const sizeMatch = title.match(/(\d{2}(?:\.\d)?)["-]/);
   const screenSize = sizeMatch ? sizeMatch[1] + '"' : null;
 
-  let modelType = null;
-  if (/Air/i.test(title)) modelType = 'MacBook Air';
-  else if (/MacBook Pro/i.test(title)) modelType = 'MacBook Pro';
-  else if (/Mac Mini/i.test(title)) modelType = 'Mac Mini';
-  else if (/Mac Studio/i.test(title)) modelType = 'Mac Studio';
-  else if (/iPad Pro/i.test(title)) modelType = 'iPad Pro';
-  else if (/iPad Air/i.test(title)) modelType = 'iPad Air';
-  else if (/iPad/i.test(title)) modelType = 'iPad';
+  const modelType = parseModelType(title);
 
   const originalPrice = product.regularPrice || 0;
   const currentPrice = product.salePrice || product.regularPrice || 0;
@@ -177,7 +222,7 @@ function normalizeClearanceProduct(product) {
     source: SOURCE,
     category: detectCategory(text),
     name: title || `SKU ${product.sku}`,
-    brand: product.manufacturer || '',
+    brand: product.manufacturer || parseBrand(title) || '',
     originalPrice,
     currentPrice,
     condition: 'Clearance',
@@ -191,6 +236,66 @@ function normalizeClearanceProduct(product) {
     ram,
     storage
   });
+}
+
+function parseModelType(title) {
+  // Apple models
+  if (/MacBook Air/i.test(title)) return 'MacBook Air';
+  if (/MacBook Pro/i.test(title)) return 'MacBook Pro';
+  if (/Mac Mini/i.test(title)) return 'Mac Mini';
+  if (/Mac Studio/i.test(title)) return 'Mac Studio';
+  if (/iPad Pro/i.test(title)) return 'iPad Pro';
+  if (/iPad Air/i.test(title)) return 'iPad Air';
+  if (/\biPad\b/i.test(title)) return 'iPad';
+  // HP models
+  if (/OmniBook/i.test(title)) return 'OmniBook';
+  if (/Spectre/i.test(title)) return 'Spectre';
+  if (/Envy/i.test(title)) return 'Envy';
+  if (/Pavilion/i.test(title)) return 'Pavilion';
+  if (/Omen/i.test(title)) return 'Omen';
+  // Dell models
+  if (/\bXPS\b/i.test(title)) return 'XPS';
+  if (/Inspiron/i.test(title)) return 'Inspiron';
+  if (/Latitude/i.test(title)) return 'Latitude';
+  if (/Alienware/i.test(title)) return 'Alienware';
+  // Lenovo models
+  if (/ThinkPad/i.test(title)) return 'ThinkPad';
+  if (/IdeaPad/i.test(title)) return 'IdeaPad';
+  if (/\bYoga\b/i.test(title)) return 'Yoga';
+  if (/Legion/i.test(title)) return 'Legion';
+  // ASUS models
+  if (/ZenBook/i.test(title)) return 'ZenBook';
+  if (/VivoBook/i.test(title)) return 'VivoBook';
+  if (/\bROG\b/i.test(title)) return 'ROG';
+  if (/\bTUF\b/i.test(title)) return 'TUF';
+  // Microsoft
+  if (/Surface Pro/i.test(title)) return 'Surface Pro';
+  if (/Surface Laptop/i.test(title)) return 'Surface Laptop';
+  if (/Surface Book/i.test(title)) return 'Surface Book';
+  // Other
+  if (/Chromebook/i.test(title)) return 'Chromebook';
+  if (/Galaxy Book/i.test(title)) return 'Galaxy Book';
+  if (/\bGram\b/i.test(title)) return 'Gram';
+  if (/Razer Blade/i.test(title)) return 'Razer Blade';
+  if (/Galaxy Tab/i.test(title)) return 'Galaxy Tab';
+  return null;
+}
+
+function parseBrand(text) {
+  // Product names often start with "Brand - Product Name..."
+  const dashMatch = text.match(/^([A-Za-z]+(?:\s+[A-Za-z]+)?)\s*-\s*/);
+  if (dashMatch) {
+    const brand = dashMatch[1].trim();
+    // Common brand names
+    const knownBrands = ['Apple', 'HP', 'Dell', 'Lenovo', 'ASUS', 'Acer', 'Microsoft', 'Samsung', 'LG', 'Razer', 'MSI', 'Alienware', 'Google'];
+    for (const known of knownBrands) {
+      if (brand.toLowerCase() === known.toLowerCase()) {
+        return known;
+      }
+    }
+    return brand;
+  }
+  return null;
 }
 
 function parseProcessor(text) {
@@ -231,14 +336,7 @@ function normalizeOffer(product, offer = null) {
   const sizeMatch = title.match(/(\d{2}(?:\.\d)?)["-]/);
   const screenSize = sizeMatch ? sizeMatch[1] + '"' : null;
 
-  let modelType = null;
-  if (/Air/i.test(title)) modelType = 'MacBook Air';
-  else if (/MacBook Pro/i.test(title)) modelType = 'MacBook Pro';
-  else if (/Mac Mini/i.test(title)) modelType = 'Mac Mini';
-  else if (/Mac Studio/i.test(title)) modelType = 'Mac Studio';
-  else if (/iPad Pro/i.test(title)) modelType = 'iPad Pro';
-  else if (/iPad Air/i.test(title)) modelType = 'iPad Air';
-  else if (/iPad/i.test(title)) modelType = 'iPad';
+  const modelType = parseModelType(title);
 
   // Pricing
   const originalPrice = offer?.prices?.regular || product.prices?.regular || 0;
@@ -266,7 +364,7 @@ function normalizeOffer(product, offer = null) {
     source: SOURCE,
     category: detectCategory(text),
     name: title || `SKU ${product.sku}`,
-    brand: product.manufacturer || '',
+    brand: product.manufacturer || parseBrand(title) || '',
     originalPrice,
     currentPrice,
     condition,
@@ -331,7 +429,7 @@ async function fetchDeals(apiKey, options = {}) {
     await delay(2000);
   }
 
-  // Fetch Clearance items
+  // Fetch Clearance items (category-based - mostly Apple)
   console.log('Fetching Clearance items...');
   for (const categoryKey of categories) {
     const categoryId = CATEGORY_IDS[categoryKey];
@@ -346,7 +444,34 @@ async function fetchDeals(apiKey, options = {}) {
     await delay(2000);
   }
 
-  console.log(`Total Best Buy deals: ${allDeals.length} (Open Box + Clearance)`);
+  // Fetch deals via search (better brand coverage - HP, Dell, Lenovo, etc.)
+  console.log('Fetching deals by search (multi-brand coverage)...');
+  const searchTerms = ['laptop', 'notebook', 'chromebook'];
+  const seenSkus = new Set(allDeals.map(d => d.sku));
+
+  for (const term of searchTerms) {
+    try {
+      const searchProducts = await fetchDealsBySearch(apiKey, term, 'clearance');
+
+      for (const product of searchProducts) {
+        // Skip if we already have this SKU from category-based fetch
+        if (seenSkus.has(String(product.sku))) continue;
+        seenSkus.add(String(product.sku));
+
+        // Only include if it has a meaningful discount
+        const savings = product.percentSavings || 0;
+        if (savings >= 5) {
+          allDeals.push(normalizeClearanceProduct(product));
+        }
+      }
+
+      await delay(2000);
+    } catch (e) {
+      console.log(`  Search for "${term}" failed: ${e.message}`);
+    }
+  }
+
+  console.log(`Total Best Buy deals: ${allDeals.length} (Open Box + Clearance + Search)`);
 
   // Cache results
   cache.write(SOURCE, allDeals);

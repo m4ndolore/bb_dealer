@@ -1,5 +1,6 @@
 // services/bestbuyAvailability.js
 import { chromium } from "playwright";
+import { createTtlCache } from "./memoryCache.js";
 
 /**
  * Keep one browser/context alive for performance.
@@ -11,6 +12,7 @@ let context;
 export async function initBestBuySession() {
   if (context) return context;
 
+  console.log("BestBuy session: launching Playwright...");
   browser = await chromium.launch({ headless: true });
   context = await browser.newContext({
     viewport: { width: 1400, height: 900 },
@@ -19,46 +21,20 @@ export async function initBestBuySession() {
 
   // Warm session so cookies/bot challenges are handled in real browser context
   const page = await context.newPage();
-  await page.goto("https://www.bestbuy.com", { waitUntil: "domcontentloaded" });
+  try {
+    console.log("BestBuy session: warming up homepage...");
+    await page.goto("https://www.bestbuy.com", {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    });
+    console.log("BestBuy session: warm-up complete.");
+  } catch (e) {
+    // Best Buy sometimes stalls or blocks; proceed anyway so API calls can still work.
+    console.warn(`BestBuy warmup failed: ${e.message}`);
+  }
   await page.close();
 
   return context;
-}
-
-export async function fetchProductVariants(sku, apiKey) {
-  const url =
-    `https://api.bestbuy.com/v1/products/${sku}.json?format=json` +
-    `&show=sku,name,color,modelNumber,productVariations.sku` +
-    `&apiKey=${encodeURIComponent(apiKey)}`;
-
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`Products API failed ${r.status}`);
-  const p = await r.json();
-
-  return {
-    sku: p.sku,
-    color: p.color,
-    modelNumber: p.modelNumber,
-    variations: (p.productVariations?.sku || []).map(String),
-  };
-}
-
-export async function fetchOpenBoxBuyingOptions(sku, apiKey) {
-  const url =
-    `https://api.bestbuy.com/beta/products/${sku}/openBox?apiKey=${encodeURIComponent(apiKey)}`;
-
-  const r = await fetch(url);
-  if (!r.ok) return { sku: String(sku), offers: [], raw: null };
-
-  const json = await r.json();
-  const results = json?.results || [];
-  const offers = results.flatMap(x => (x.offers || []).map(o => ({
-    condition: o.condition,              // "excellent" or "certified"
-    current: o.prices?.current,
-    regular: o.prices?.regular,
-  })));
-
-  return { sku: String(sku), offers, raw: json };
 }
 
 export async function closeBestBuySession() {
@@ -85,6 +61,17 @@ export const conditionCodeMap = {
   excellent: "2",  // placeholder - confirm
 };
 
+export function mapConditionCodeToLabel(code) {
+  const inverse = {
+    "0": "fair",
+    "1": "good",
+    "2": "excellent",
+  };
+  return inverse[String(code)] || String(code);
+}
+
+const availabilityCache = createTtlCache({ ttlMs: 8 * 60 * 1000, maxEntries: 1000 });
+
 /**
  * Base payload - matches the JSON you captured.
  */
@@ -107,27 +94,21 @@ function basePayload(zipCode) {
 /**
  * Build items array for multiple SKUs + multiple conditions in one call.
  */
-function buildItems({ skus, conditions, quantity = 1 }) {
+function buildItemsFromCombos({ combos, quantity = 1 }) {
   const items = [];
   let seq = 1;
-
-  for (const sku of skus) {
-    for (const cond of conditions) {
-      const condCode = conditionCodeMap[cond];
-      if (!condCode) throw new Error(`Unknown condition: ${cond}`);
-
-      items.push({
-        sku: String(sku),
-        condition: String(condCode),
-        quantity,
-        itemSeqNumber: String(seq++),
-        reservationToken: null,
-        selectedServices: [],
-        requiredAccessories: [],
-        isTradeIn: false,
-        isLeased: false,
-      });
-    }
+  for (const combo of combos) {
+    items.push({
+      sku: String(combo.sku),
+      condition: String(combo.condition),
+      quantity,
+      itemSeqNumber: String(seq++),
+      reservationToken: null,
+      selectedServices: [],
+      requiredAccessories: [],
+      isTradeIn: false,
+      isLeased: false,
+    });
   }
   return items;
 }
@@ -163,7 +144,7 @@ export function extractHits(respJson) {
           minPickupMinutes: av?.minPickupMinutes,
           maxPickupTime: av?.maxPickupTime,
           displayDateType: av?.displayDateType,
-          availabilityToken: av?.availabilityToken, // treat as sensitive
+          availabilityToken: av?.availabilityToken,
         });
       }
     }
@@ -175,9 +156,42 @@ export function extractHits(respJson) {
  * Main function: ZIP + SKUs + conditions -> availability hits.
  */
 export async function getStoreAvailability({ zipCode, skus, conditions }) {
+  if (!zipCode) throw new Error("zipCode required");
+  if (!Array.isArray(skus) || !Array.isArray(conditions)) {
+    throw new Error("skus[] and conditions[] required");
+  }
+
+  const start = Date.now();
+  console.log(
+    `storeAvailability: zip ${zipCode} skus ${skus.length} conditions ${conditions.length}`
+  );
+
+  const cachedHits = [];
+  const missingCombos = [];
+
+  for (const sku of skus) {
+    for (const cond of conditions) {
+      const condCode = conditionCodeMap[cond] || String(cond);
+      const cacheKey = `${zipCode}|${sku}|${condCode}`;
+      const cached = availabilityCache.get(cacheKey);
+      if (cached !== null) {
+        cachedHits.push(...cached);
+      } else {
+        missingCombos.push({ sku: String(sku), condition: String(condCode) });
+      }
+    }
+  }
+
+  if (missingCombos.length === 0) {
+    console.log(
+      `storeAvailability: cache hit for all combos (${cachedHits.length} hits)`
+    );
+    return { raw: null, hits: cachedHits };
+  }
+
   const ctx = await initBestBuySession();
   const payload = basePayload(zipCode);
-  payload.items = buildItems({ skus, conditions });
+  payload.items = buildItemsFromCombos({ combos: missingCombos });
 
   const res = await ctx.request.post(STORE_AVAIL_URL, { data: payload });
 
@@ -187,8 +201,23 @@ export async function getStoreAvailability({ zipCode, skus, conditions }) {
   }
 
   const json = await res.json();
-  return {
-    raw: json,
-    hits: extractHits(json),
-  };
+  const hits = extractHits(json);
+  const durationMs = Date.now() - start;
+  console.log(
+    `storeAvailability: zip ${zipCode} -> ${hits.length} hits (${durationMs}ms)`
+  );
+
+  const grouped = new Map();
+  for (const hit of hits) {
+    const key = `${zipCode}|${hit.sku}|${hit.conditionCode}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(hit);
+  }
+
+  for (const combo of missingCombos) {
+    const key = `${zipCode}|${combo.sku}|${combo.condition}`;
+    availabilityCache.set(key, grouped.get(key) || []);
+  }
+
+  return { raw: json, hits: [...cachedHits, ...hits] };
 }

@@ -10,9 +10,11 @@
  *   2. node server.js
  *   3. Open http://localhost:3000 in your browser
  *
- * Set your API key via environment variable:
- *   BESTBUY_API_KEY=your_key node server.js
+ * API key is loaded from .env.local in project root
  */
+
+// Load environment variables from .env.local
+require('dotenv').config({ path: '.env.local' });
 
 const http = require('http');
 const https = require('https');
@@ -22,6 +24,17 @@ const path = require('path');
 // New modular architecture
 const { fetchAllDeals } = require('./lib/deals');
 const { CATEGORIES } = require('./lib/categories');
+const retailStores = require('./config/retail-stores.json');
+
+const retailStoreIndex = new Map(
+  (retailStores.stores || []).map(store => [String(store.id), store])
+);
+
+let availabilityModulePromise;
+let storePinnedModulePromise;
+let productApiModulePromise;
+let openBoxApiModulePromise;
+let seedZipsModulePromise;
 
 const PORT = process.env.PORT || 3000;
 let API_KEY = process.env.BESTBUY_API_KEY || '';
@@ -56,6 +69,78 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => {
+      body += chunk;
+      if (body.length > 2 * 1024 * 1024) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (!body) return resolve({});
+      try {
+        resolve(JSON.parse(body));
+      } catch (e) {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+  });
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const i = index++;
+      results[i] = await mapper(items[i], i);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+async function getAvailabilityModule() {
+  if (!availabilityModulePromise) {
+    availabilityModulePromise = import('./services/bestbuyAvailability.js');
+  }
+  return availabilityModulePromise;
+}
+
+async function getStorePinnedModule() {
+  if (!storePinnedModulePromise) {
+    storePinnedModulePromise = import('./services/storePinnedSearch.js');
+  }
+  return storePinnedModulePromise;
+}
+
+async function getProductApiModule() {
+  if (!productApiModulePromise) {
+    productApiModulePromise = import('./services/bestbuyProductApi.js');
+  }
+  return productApiModulePromise;
+}
+
+async function getOpenBoxApiModule() {
+  if (!openBoxApiModulePromise) {
+    openBoxApiModulePromise = import('./services/bestbuyOpenBoxApi.js');
+  }
+  return openBoxApiModulePromise;
+}
+
+async function getSeedZipsModule() {
+  if (!seedZipsModulePromise) {
+    seedZipsModulePromise = import('./config/seed-zips.js');
+  }
+  return seedZipsModulePromise;
+}
+
 
 // HTML template
 const HTML = `<!DOCTYPE html>
@@ -85,6 +170,7 @@ const HTML = `<!DOCTYPE html>
     let processorFilter = 'all';
     let conditionFilter = 'all';
     let modelFilter = 'all';
+    let brandFilter = 'all';
     let minRamFilter = 0;
     let availabilityFilter = 'all'; // 'all', 'ships', 'instore'
     let categoryFilter = 'all';
@@ -94,11 +180,11 @@ const HTML = `<!DOCTYPE html>
 
     // Category definitions (from server)
     const CATEGORIES = {
-      storage: { name: 'Storage' },
-      compute: { name: 'Compute' },
-      memory: { name: 'Memory' },
+      laptops: { name: 'Laptops' },
+      desktops: { name: 'Desktops' },
       tablets: { name: 'Tablets' },
-      laptops: { name: 'Laptops' }
+      storage: { name: 'Storage' },
+      memory: { name: 'Memory' }
     };
 
     // Source definitions
@@ -130,49 +216,52 @@ const HTML = `<!DOCTYPE html>
       render();
     }
 
-    // Map our condition names to BB's condition codes
-    function getConditionCode(condition) {
-      // Based on observation: "0" = fair from the URL pattern
-      // Need to test others, but likely: 0=fair, 1=satisfactory, 2=good, 3=excellent
-      if (condition.includes('Fair')) return '0';
-      if (condition.includes('Satisfactory')) return '1';
-      if (condition.includes('Good')) return '2';
-      if (condition.includes('Excellent')) return '3';
-      return '0'; // Default to fair
-    }
-
-    async function findStores(sku, condition = 'Open-Box Fair') {
+    async function findStores(sku) {
       if (!postalCode || postalCode.length < 5) {
         alert('Please enter your zip code first');
         return;
       }
       
-      const conditionCode = getConditionCode(condition);
-      storeModal = { sku, condition, stores: [], loading: true, error: null };
+      const conditions = ['fair', 'good', 'excellent'];
+      storeModal = { sku, conditions, stores: [], loading: true, error: null };
       render();
       
       try {
-        const params = new URLSearchParams({
-          zipCode: postalCode,
-          condition: conditionCode
+        const res = await fetch('/api/find-stock', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            skus: [sku],
+            conditions,
+            seedZips: [postalCode],
+            maxZips: 1
+          })
         });
-        
-        const res = await fetch(\`/api/openbox-stores/\${sku}?\${params}\`);
         const data = await res.json();
         
         if (data.error) throw new Error(data.error);
-        
-        storeModal = { 
+
+        const hits = data.hits || [];
+        const byStore = new Map();
+
+        for (const hit of hits) {
+          const storeId = String(hit.storeId || '');
+          if (!byStore.has(storeId)) {
+            byStore.set(storeId, { storeId, store: hit.store || null, hits: [] });
+          }
+          byStore.get(storeId).hits.push(hit);
+        }
+
+        storeModal = {
           sku,
-          condition,
-          stores: data.stores || [], 
-          loading: false, 
+          conditions,
+          stores: [...byStore.values()],
+          loading: false,
           error: null,
-          buttonState: data.buttonState,
           product: products.find(p => p.sku === sku)
         };
       } catch (e) {
-        storeModal = { sku, condition, stores: [], loading: false, error: e.message };
+        storeModal = { sku, conditions, stores: [], loading: false, error: e.message };
       }
       render();
     }
@@ -186,6 +275,7 @@ const HTML = `<!DOCTYPE html>
       return products
         .filter(p => categoryFilter === 'all' || p.category === categoryFilter)
         .filter(p => sourceFilter === 'all' || p.source === sourceFilter)
+        .filter(p => brandFilter === 'all' || p.brand === brandFilter)
         .filter(p => processorFilter === 'all' || p.processor === processorFilter)
         .filter(p => conditionFilter === 'all' || p.condition === conditionFilter)
         .filter(p => modelFilter === 'all' || p.modelType === modelFilter)
@@ -239,7 +329,7 @@ const HTML = `<!DOCTYPE html>
               <div class="flex justify-between items-start mb-4">
                 <div>
                   <h2 class="text-xl font-bold text-white">Open-Box Pickup Locations</h2>
-                  <p class="text-sm text-gray-400 mt-1">SKU \${storeModal.sku} · \${storeModal.condition}</p>
+                  <p class="text-sm text-gray-400 mt-1">SKU \${storeModal.sku} · \${storeModal.conditions.join(', ')}</p>
                 </div>
                 <button onclick="closeModal()" class="text-gray-400 hover:text-white text-2xl">&times;</button>
               </div>
@@ -277,13 +367,21 @@ const HTML = `<!DOCTYPE html>
                     <div class="bg-gray-700 rounded-lg p-4">
                       <div class="flex justify-between items-start">
                         <div>
-                          <div class="font-semibold text-white text-lg">\${store.name}</div>
-                          <div class="text-sm text-gray-400">\${store.address}</div>
-                          <div class="text-sm text-gray-400">\${store.city}, \${store.state} \${store.zipCode}</div>
-                          <div class="text-xs text-gray-500 mt-1">\${store.phone || ''}</div>
+                          <div class="font-semibold text-white text-lg">\${store.store?.name || 'Store ' + store.storeId}</div>
+                          <div class="text-sm text-gray-400">\${store.store?.address || ''}</div>
+                          <div class="text-sm text-gray-400">\${store.store ? \`\${store.store.city}, \${store.store.state} \${store.store.zip}\` : ''}</div>
+                          <div class="text-xs text-gray-500 mt-1">\${store.store?.phone || ''}</div>
+                          <div class="text-xs text-gray-400 mt-2">
+                            \${store.hits.map(hit => \`
+                              <span class="inline-block mr-2 mb-1 px-2 py-1 bg-gray-800 text-gray-200 text-xs rounded-lg">
+                                \${hit.condition} · qty \${hit.qty}\${hit.variantSku && hit.originalSku && hit.variantSku !== hit.originalSku ? \` · variant \${hit.variantSku}\` : ''}
+                              </span>
+                            \`).join('')}
+                          </div>
                         </div>
                         <div class="text-right">
-                          <div class="text-xl font-bold text-blue-400">\${store.distance ? store.distance.toFixed(1) + ' mi' : ''}</div>
+                          <div class="text-xs text-gray-400">Store ID</div>
+                          <div class="text-lg font-bold text-blue-400">\${store.storeId || ''}</div>
                         </div>
                       </div>
                     </div>
@@ -385,7 +483,14 @@ const HTML = `<!DOCTYPE html>
               </select>
             </div>
           </div>
-          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+          <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Brand</label>
+              <select onchange="brandFilter=this.value;render()" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm">
+                <option value="all">All Brands</option>
+                \${getUnique('brand').filter(Boolean).map(b => \`<option value="\${b}" \${brandFilter===b?'selected':''}>\${b}</option>\`).join('')}
+              </select>
+            </div>
             <div>
               <label class="block text-xs text-gray-400 mb-1">Model</label>
               <select onchange="modelFilter=this.value;render()" class="w-full bg-gray-700 border border-gray-600 rounded-lg px-3 py-2 text-sm">
@@ -468,7 +573,7 @@ const HTML = `<!DOCTYPE html>
                   }">-\${p.discount}%</div>
                   <div class="flex flex-col gap-1">
                     <a href="\${p.url}" target="_blank" class="px-4 py-2 bg-yellow-500 hover:bg-yellow-400 text-black font-medium rounded-lg transition text-center text-sm">View</a>
-                    \${p.availability === 'in-store' ? \`<button onclick="findStores('\${p.sku}', '\${p.condition}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">Find Stock</button>\` : ''}
+                    \${p.availability === 'in-store' ? \`<button onclick="findStores('\${p.sku}')" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white font-medium rounded-lg transition text-sm">Find Stock</button>\` : ''}
                   </div>
                 </div>
               </div>
@@ -491,6 +596,197 @@ const HTML = `<!DOCTYPE html>
 // HTTP Server
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  if (url.pathname === '/api/find-stock' && req.method === 'POST') {
+    res.setHeader('Content-Type', 'application/json');
+
+    try {
+      const body = await readJsonBody(req);
+      const { skus, conditions, seedZips, maxZips } = body || {};
+
+      if (!Array.isArray(skus) || skus.length === 0 || !Array.isArray(conditions) || conditions.length === 0) {
+        res.end(JSON.stringify({ error: 'skus[] and conditions[] required' }));
+        return;
+      }
+
+      const normalizedConditions = conditions.map(c => String(c).trim().toLowerCase()).filter(Boolean);
+      if (normalizedConditions.length === 0) {
+        res.end(JSON.stringify({ error: 'conditions[] required' }));
+        return;
+      }
+
+      const apiKey = process.env.BBY_API_KEY || process.env.BESTBUY_API_KEY || '';
+      const seedModule = await getSeedZipsModule();
+      const defaultSeeds = seedModule.SEED_ZIPS_80 || [];
+      const providedSeeds = Array.isArray(seedZips) && seedZips.length ? seedZips : defaultSeeds;
+      const maxCount = Number.isFinite(Number(maxZips)) ? Number(maxZips) : providedSeeds.length;
+      const zips = providedSeeds.slice(0, Math.max(1, maxCount));
+
+      const { getStoreAvailability, mapConditionCodeToLabel } = await getAvailabilityModule();
+
+      const startedAt = Date.now();
+      const concurrency = 3;
+      console.log(
+        `find-stock: skus=${skus.length} conditions=${normalizedConditions.join(",")} zips=${zips.length} concurrency=${concurrency}`
+      );
+
+      const zipResponses = await mapWithConcurrency(zips, concurrency, async (zipCode) => {
+        const { hits } = await getStoreAvailability({
+          zipCode,
+          skus,
+          conditions: normalizedConditions,
+        });
+        return { zipCode, hits };
+      });
+
+      let hits = zipResponses.flatMap(r => r.hits.map(hit => ({
+        ...hit,
+        searchedZip: r.zipCode,
+      })));
+
+      const foundSkus = new Set(hits.map(h => String(h.sku)));
+      const missingSkus = skus.filter(s => !foundSkus.has(String(s)));
+
+      if (missingSkus.length > 0 && apiKey) {
+        const { fetchProductVariants } = await getProductApiModule();
+
+        const variantMap = new Map();
+        for (const sku of missingSkus) {
+          try {
+            console.log(`find-stock: variant lookup for ${sku}`);
+            const variants = await fetchProductVariants(sku, apiKey);
+            for (const v of variants.variations || []) {
+              if (!variantMap.has(String(v))) {
+                variantMap.set(String(v), String(sku));
+              }
+            }
+          } catch (e) {
+            console.log(`Variant lookup failed for ${sku}: ${e.message}`);
+          }
+        }
+
+        const variantSkus = [...variantMap.keys()].filter(v => !skus.includes(v));
+        if (variantSkus.length > 0) {
+          const variantResponses = await mapWithConcurrency(zips, concurrency, async (zipCode) => {
+            const { hits: variantHits } = await getStoreAvailability({
+              zipCode,
+              skus: variantSkus,
+              conditions: normalizedConditions,
+            });
+            return { zipCode, hits: variantHits };
+          });
+
+          const variantHits = variantResponses.flatMap(r => r.hits.map(hit => ({
+            ...hit,
+            searchedZip: r.zipCode,
+            originalSku: variantMap.get(String(hit.sku)) || null,
+            variantSku: String(hit.sku),
+          })));
+
+          hits = hits.concat(variantHits);
+        }
+      }
+
+      const deduped = [];
+      const seen = new Set();
+      for (const hit of hits) {
+        const key = `${hit.sku}|${hit.conditionCode}|${hit.storeId}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        deduped.push(hit);
+      }
+
+      const { fetchOpenBoxBuyingOptions } = apiKey ? await getOpenBoxApiModule() : { fetchOpenBoxBuyingOptions: null };
+      const openBoxBySku = new Map();
+      if (apiKey && fetchOpenBoxBuyingOptions) {
+        const uniqueSkus = [...new Set(deduped.map(h => String(h.sku)))];
+        console.log(`find-stock: fetching open-box offers for ${uniqueSkus.length} SKUs`);
+        const offerResponses = await mapWithConcurrency(uniqueSkus, 3, async (sku) => {
+          try {
+            const data = await fetchOpenBoxBuyingOptions(sku, apiKey);
+            return { sku, offers: data.offers || [] };
+          } catch (e) {
+            return { sku, offers: [] };
+          }
+        });
+
+        for (const entry of offerResponses) {
+          openBoxBySku.set(String(entry.sku), entry.offers || []);
+        }
+      }
+
+      const payloadHits = deduped.map(hit => {
+        const offers = openBoxBySku.get(String(hit.sku)) || [];
+        return {
+          sku: String(hit.sku),
+          originalSku: hit.originalSku || String(hit.sku),
+          variantSku: hit.variantSku || String(hit.sku),
+          conditionCode: String(hit.conditionCode),
+          condition: mapConditionCodeToLabel(hit.conditionCode),
+          storeId: String(hit.storeId),
+          qty: hit.qty,
+          fulfillmentType: hit.fulfillmentType,
+          minDate: hit.minDate,
+          maxDate: hit.maxDate,
+          minPickupMinutes: hit.minPickupMinutes,
+          maxPickupTime: hit.maxPickupTime,
+          displayDateType: hit.displayDateType,
+          searchedZip: hit.searchedZip,
+          store: retailStoreIndex.get(String(hit.storeId)) || null,
+          shipEligibleOpenBox: offers.length > 0,
+          openBoxOffers: offers,
+        };
+      });
+
+      const durationMs = Date.now() - startedAt;
+      res.end(JSON.stringify({
+        skus,
+        conditions: normalizedConditions,
+        seedZips: zips,
+        hits: payloadHits,
+        timing: {
+          durationMs,
+          zipsScanned: zips.length,
+          hitCount: payloadHits.length,
+        },
+      }));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message || String(e) }));
+    }
+    return;
+  }
+
+  if (url.pathname === '/api/store-scan' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    const storeId = url.searchParams.get('storeId');
+    const q = url.searchParams.get('q') || '';
+    const ram = url.searchParams.get('ram');
+    const extraFacets = url.searchParams.getAll('facet');
+
+    if (!storeId) {
+      res.end(JSON.stringify({ error: 'storeId required' }));
+      return;
+    }
+
+    if (ram) {
+      const trimmed = String(ram).trim();
+      const ramLabel = /^\d+$/.test(trimmed) ? `${trimmed} gigabytes` : trimmed;
+      extraFacets.push(`systemmemoryram_facet=RAM~${ramLabel}`);
+    }
+
+    try {
+      const { fetchStorePinnedResults } = await getStorePinnedModule();
+      const result = await fetchStorePinnedResults({
+        storeId,
+        st: q,
+        extraFacets,
+      });
+      res.end(JSON.stringify(result));
+    } catch (e) {
+      res.end(JSON.stringify({ error: e.message || String(e) }));
+    }
+    return;
+  }
   
   // Open-box store availability endpoint (uses Playwright to scrape BB)
   if (url.pathname.startsWith('/api/openbox-stores/')) {

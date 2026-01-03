@@ -24,7 +24,7 @@ Find open-box M4/M5 MacBook deals at Best Buy with real-time inventory and store
 
 3. **Set your API key**:
    ```bash
-   export BESTBUY_API_KEY="your_api_key_here"
+   export BBY_API_KEY="your_api_key_here"
    ```
    Or add to `~/.zshrc` for permanence.
 
@@ -56,7 +56,34 @@ Find open-box M4/M5 MacBook deals at Best Buy with real-time inventory and store
 1. **Product data**: Uses Best Buy's public Open Box API to find M4/M5 MacBooks
 2. **Store availability**: Uses Playwright to load the product page in a real browser and capture the store availability data (Best Buy blocks direct API calls from scripts)
 
+node scripts/test-availability.js --sku 6602752 --conditions fair,good,excellent --zip 96734
+
 ## Environment Variables
 
-- `BESTBUY_API_KEY` - Required. Your Best Buy API key
+- `BBY_API_KEY` - Required for variant lookups and open-box shipping offers
+- `BESTBUY_API_KEY` - Required for existing product deal fetches (still supported for new endpoints if BBY_API_KEY is not set)
 - `PORT` - Optional. Server port (default: 3000)
+
+## Inventory APIs
+
+- `POST /api/find-stock`
+  - Body: `{ "skus": ["6602747"], "conditions": ["fair","good","excellent"], "seedZips": ["30303"], "maxZips": 40 }`
+  - Returns store hits enriched with store metadata and open-box offer summaries.
+- `GET /api/store-scan?storeId=2651&q=macbook%20pro&ram=48`
+  - Uses a store-pinned search URL to list what is available at a specific store.
+
+## Seed ZIPs
+
+- Default seed list lives in `config/seed-zips.js` (SEED_ZIPS_80).
+- Generate a new farthest-point seed list:
+  ```bash
+  node scripts/generate-seed-zips.js 80
+  ```
+  Output: `config/generated-seeds.json`
+
+## Quick Tests
+
+```bash
+node scripts/test-availability.js --sku 6602747 --conditions fair,good,excellent --zip 30303
+node scripts/test-store-scan.js --storeId 2651 --q "macbook pro m4 max 36gb 1tb"
+```

@@ -8,8 +8,13 @@
     "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
+    "dotenv": "^17.2.3",
     "playwright": "^1.40.0"
   },
-  "keywords": ["bestbuy", "macbook", "deals"],
+  "keywords": [
+    "bestbuy",
+    "macbook",
+    "deals"
+  ],
   "license": "MIT"
 }
